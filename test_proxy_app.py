@@ -434,6 +434,23 @@ assert "linux-musl" in ud and "linux-gnu" not in ud, "the -gnu build crash-loops
 assert ud.index("ssserver --version") < ud.index("systemctl enable")
 assert ud.index("ss -ltn") < ud.index("echo SS-SETUP-DONE") and "SS-SETUP-FAILED" in ud
 
+# versions and the update notice
+assert app.version_tuple("v1.2.10") == (1, 2, 10) and app.version_tuple("1.0.0") == (1, 0, 0)
+assert app.version_tuple("v1.10.0") > app.version_tuple("1.9.9"), "compare numerically, not as text"
+changelog = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "CHANGELOG.md"), encoding="utf-8").read()
+assert f"## {app.__version__}" in changelog, "every version needs a CHANGELOG entry (it becomes the release notes)"
+class Rel(io.BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+real_urlopen = app.urllib.request.urlopen
+app.urllib.request.urlopen = lambda *a, **k: Rel(b'{"tag_name": "v99.0.0"}')
+assert app.newer_release() == "v99.0.0"
+app.urllib.request.urlopen = lambda *a, **k: Rel(json.dumps({"tag_name": "v" + app.__version__}).encode())
+assert app.newer_release() is None
+app.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(OSError("offline"))
+assert app.newer_release() is None, "no network must never break the app"
+app.urllib.request.urlopen = real_urlopen
+
 # safety net is scheduled before anything that could fail
 ud = app.user_data("x")
 assert ud.index("shutdown -h +") < ud.index("curl ")

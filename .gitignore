@@ -5,6 +5,9 @@ config.json
 *.pem
 *.log
 
+build/
+dist/
+*.spec
 __pycache__/
 *.pyc
 .venv/

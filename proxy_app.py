@@ -31,6 +31,8 @@ import zipfile
 from datetime import datetime, timezone
 from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
+__version__ = "1.0.0"
+REPO = "ShRike3601/proxy-on-demand"  # GitHub repo, for the "new version available" notice
 ROLE_NAME = "proxy-on-demand-role"  # IAM role holding the app's EC2 permissions; assumable only with MFA
 SESSION_SECONDS = 3600              # temporary credentials last 1 hour, in memory only
 OLD_PROFILE = "proxy-on-demand"     # plain-text profile used by earlier versions; removed on first save
@@ -692,7 +694,7 @@ class App:
         os.makedirs(APP_DIR, exist_ok=True)
         moved = migrate_old_files()
 
-        root.title("Proxy on demand")
+        root.title(f"Proxy on demand {__version__}")
         root.geometry("900x720")
         root.minsize(780, 620)
         root.option_add("*Font", ("Segoe UI", 10))
@@ -765,7 +767,14 @@ class App:
         root.after(60_000, self.health)
         if moved:
             self.log(f"Moved your saved {' and '.join(moved)} to {APP_DIR}")
+        threading.Thread(target=self.check_for_update, daemon=True).start()
         self.refresh()
+
+    def check_for_update(self):
+        tag = newer_release()
+        if tag:
+            self.log(f"A new version ({tag}) is available: https://github.com/{REPO}/releases/latest")
+            self.q.put(("title", f"Proxy on demand {__version__}  -  update available: {tag}"))
 
     def save_hours(self):
         hours = clamp_hours(self.hours.get())
@@ -814,6 +823,8 @@ class App:
                     self.step_index, self.step_started = keys.index(msg), time.time()
             elif kind == "start_label":
                 self.start_btn.config(text=msg)
+            elif kind == "title":
+                self.root.title(msg)
             elif kind == "popup":
                 messagebox.showinfo("Proxy on demand", msg)
             elif kind == "warn":
@@ -1250,15 +1261,48 @@ class App:
             self.root.destroy()
 
 
+def version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:3])
+
+
+def newer_release():
+    """The latest GitHub release tag if it is newer than this version, else None. Never raises."""
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
+                                     headers={"User-Agent": "proxy-on-demand", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            tag = json.load(r)["tag_name"]
+        return tag if version_tuple(tag) > version_tuple(__version__) else None
+    except Exception:
+        return None  # offline, rate-limited, private repo: just skip the notice
+
+
+def self_check():
+    """`--check`: prove a build is complete without touching AWS or the network. Exit code 0 = OK."""
+    import boto3  # bundled?
+    boto3.session.Session().get_available_regions("ec2")  # botocore data files bundled?
+    assert _dpapi(_dpapi(b"x", protect=True), protect=False) == b"x"
+    assert "SS-SETUP-DONE" in user_data("x") and iam_policy("ap-south-1")["Statement"]
+    root = tk.Tk()  # Tcl/Tk bundled?
+    ttk.Progressbar(root)
+    root.destroy()
+    return 0
+
+
 def ensure_admin():
-    """sing-box needs admin rights to create its network adapter; relaunch elevated if needed."""
+    """sing-box needs admin rights to create its network adapter; relaunch elevated if needed.
+    (The packaged .exe asks for admin rights through its manifest, so this is mostly for source runs.)"""
     if ctypes.windll.shell32.IsUserAnAdmin():
         return
-    exe = sys.executable
-    pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
-    if os.path.exists(pyw):
-        exe = pyw
-    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, f'"{os.path.abspath(__file__)}"', None, 1)
+    if getattr(sys, "frozen", False):
+        exe, args = sys.executable, ""
+    else:
+        exe = sys.executable
+        pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(pyw):
+            exe = pyw
+        args = f'"{os.path.abspath(__file__)}"'
+    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, args, None, 1)
     sys.exit(0 if rc > 32 else "Administrator rights are needed to run sing-box.")
 
 
@@ -1269,6 +1313,11 @@ def already_running():
 
 
 if __name__ == "__main__":
+    if "--version" in sys.argv:
+        print(__version__)
+        sys.exit(0)
+    if "--check" in sys.argv:
+        sys.exit(self_check())
     ensure_admin()
     if already_running():
         messagebox.showinfo("Proxy on demand", "Proxy on demand is already open. Use the window that is open.")

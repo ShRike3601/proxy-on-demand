@@ -26,14 +26,25 @@ Follow AWS's official guide: [Create an AWS account](https://docs.aws.amazon.com
 
 Follow [Creating a budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-create.html) and choose the **Monthly cost budget** template. Set a small amount such as USD 5 and your email address. AWS will email you if spending heads past it.
 
-### Step 3: Install Python on your laptop
+### Step 3: Get the app
 
-Get Python 3.11 or newer from [python.org](https://www.python.org/downloads/windows/). During setup, tick **"Add python.exe to PATH"**.
+**Option A: download the app (no Python needed).**
+1. Open the [latest release](../../releases/latest) and download **`ProxyOnDemand.exe`** (and `ProxyOnDemand.exe.sha256` if you want to verify it).
+2. Optional: check the file is genuine. In PowerShell, run `Get-FileHash .\ProxyOnDemand.exe`, and compare the result with the value in the `.sha256` file.
+3. Put it anywhere, for example a `Proxy on demand` folder on your Desktop.
 
-### Step 4: Download and open the app
+> **Windows may warn about the app.** The `.exe` isn't code-signed yet, so Windows doesn't know the publisher.
+> - **"Windows protected your PC"** (SmartScreen): click **More info → Run anyway**.
+> - **"Smart App Control blocked an app"**: Windows 11's Smart App Control doesn't allow unsigned apps at all, and it shouldn't be turned off for this. Use Option B instead.
 
-1. Click the green **Code** button on this page → **Download ZIP**, then unzip it anywhere. (Or `git clone` it.)
-2. Double-click **`Start Proxy App.bat`** and accept the Windows admin prompt. The app needs admin rights to create its network adapter.
+**Option B: run from source.**
+1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/windows/). During setup, tick **"Add python.exe to PATH"**.
+2. On this page click **Code → Download ZIP**, and unzip it anywhere (or `git clone` it).
+
+### Step 4: Open the app
+
+1. **Option A:** double-click `ProxyOnDemand.exe`. **Option B:** double-click `Start Proxy App.bat`; the first run installs the one Python dependency.
+2. Accept the Windows admin prompt. The app needs admin rights to create its network adapter.
 3. The **AWS settings** window opens.
    - **Require MFA (recommended)** is ticked. Keep it ticked and follow Steps 5–8, unless you are comfortable with AWS and prefer no phone codes; in that case untick it and follow [Setup without MFA](#setup-without-mfa) instead. You can change this later.
    - **Region:** choose the AWS region nearest to you, for example `ap-south-1` (Mumbai), `eu-west-2` (London) or `us-east-1` (N. Virginia). See [all region codes](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html).
@@ -262,34 +273,54 @@ The folder is deliberately not under `AppData`. The Microsoft Store version of P
 - **Keep a failed server for debugging:** set `KEEP_FAILED_SERVER = True` in `proxy_app.py`. It then bills until you press Stop.
 - **Auto-delete time:** set on the main window (1–24 h). The upper limit is `MAX_HOURS_LIMIT` in `proxy_app.py`.
 
-## Known limitations
-
-- **Windows only.** sing-box's network adapter, DPAPI encryption and the launcher are Windows-specific.
-- **Needs Python 3.11+** and admin rights (the network adapter needs them). There's no installer or signed `.exe` yet.
-- **Only one server at a time, in one region.** Changing region requires Stop first.
-- **Estimates are estimates.** Progress times come from typical runs, and cost figures use Mumbai prices, not your live bill. The budget alert (Step 2) is the source of truth.
-- **UDP through the tunnel** (some games and calls) is configured but hasn't been tested end to end.
-- **Some networks block this traffic** even on port 443. Port 443 doesn't make it indistinguishable from normal HTTPS.
-- **Respect your network's rules.** University, school and work networks often have acceptable-use policies about proxies and VPNs.
 - **Policies as files:** [`policies/`](policies) contains:
   - `key-policy.json`: the user policy with MFA;
   - `role-permissions.json`: the EC2 permissions for `ap-south-1`. With MFA it's attached to the role; without MFA, to the user;
   - an example trust policy, with a placeholder account.
 
   The app generates the right versions for your region and user, so prefer its Copy buttons.
+- **Update notice:** when the app opens it asks GitHub (`api.github.com`) for the latest release and, if there's a newer one, shows it in the window title and the activity log. Nothing else is sent, and nothing is downloaded automatically.
+
+## Known limitations
+
+- **Windows only.** sing-box's network adapter, DPAPI encryption and the launcher are Windows-specific.
+- **The `.exe` isn't code-signed yet.** Windows shows a SmartScreen warning, and Smart App Control blocks it (see Step 3). Run from source on those machines.
+- **Needs admin rights** (for the network adapter).
+- **Only one server at a time, in one region.** Changing region requires Stop first.
+- **Estimates are estimates.** Progress times come from typical runs, and cost figures use Mumbai prices, not your live bill. The budget alert (Step 2) is the source of truth.
+- **UDP through the tunnel** (some games and calls) is configured but hasn't been tested end to end.
+- **Some networks block this traffic** even on port 443. Port 443 doesn't make it indistinguishable from normal HTTPS.
+- **Respect your network's rules.** University, school and work networks often have acceptable-use policies about proxies and VPNs.
 
 ## Development
 
 ```
 pip install -r requirements.txt
 python test_proxy_app.py
+python proxy_app.py --check
 ```
 
 The tests run offline and make no AWS calls. They cover:
 - encrypted key storage, including tamper detection;
 - the MFA sign-in flow;
 - the policies, which a test keeps in sync with `policies/`;
-- the billing fail-safes;
-- the server startup script and config handling.
+- the billing fail-safes, Reconnect and resume;
+- the progress estimates;
+- the server startup script and config handling;
+- versioning.
 
-Set `SINGBOX_EXE` to a `sing-box.exe` to also validate the generated config. CI runs the tests on every push.
+Set `SINGBOX_EXE` to a `sing-box.exe` to also validate the generated config. `--check` verifies a build (bundled libraries, Tk, DPAPI) without touching AWS.
+
+**CI** runs on every push. It runs the tests, then builds `ProxyOnDemand.exe` and runs its `--check`.
+
+### Making a release
+
+1. Update `__version__` in `proxy_app.py`, and add a `## x.y.z` section to [CHANGELOG.md](CHANGELOG.md). A test enforces the changelog entry.
+2. Commit, then tag and push: `git tag v1.0.0 && git push origin v1.0.0`.
+3. The [release workflow](.github/workflows/release.yml):
+   - checks that the tag matches `__version__`;
+   - runs the tests;
+   - builds `ProxyOnDemand.exe` with PyInstaller and self-checks it;
+   - publishes a GitHub Release with the `.exe`, its SHA-256 checksum, and the changelog section as notes.
+
+Every Python dependency is pinned to an exact version (`requirements.txt`, plus `requirements-build.txt` for PyInstaller). Dependabot opens a pull request each month when updates exist.

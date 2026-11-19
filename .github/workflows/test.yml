@@ -12,3 +12,20 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements.txt
       - run: python test_proxy_app.py
+      - run: python proxy_app.py --check
+
+  build:
+    # Packaging problems (a library missing from the exe) show up here, before a release is tagged.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-build.txt
+      - run: pyinstaller --noconfirm --clean --onefile --windowed --uac-admin --name ProxyOnDemand proxy_app.py
+      - name: Self-check the built exe
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\ProxyOnDemand.exe -ArgumentList "--check" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "self-check failed with exit code $($p.ExitCode)" }

@@ -1,0 +1,11 @@
+# Opens pull requests when a pinned dependency or GitHub Action has an update.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
