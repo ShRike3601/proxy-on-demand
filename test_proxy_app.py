@@ -66,8 +66,11 @@ shutil.rmtree(d)
 d = tempfile.mkdtemp()
 sf = os.path.join(d, "s", "settings.json")
 assert app.load_settings(sf) == app.DEFAULT_SETTINGS  # missing file -> defaults
-app.save_settings({"region": "eu-west-1", "ssm_role": "R"}, sf)
-assert app.load_settings(sf) == {"region": "eu-west-1", "ssm_role": "R"}
+assert app.DEFAULT_SETTINGS["mfa"] is True, "MFA must be on unless the user opts out"
+app.save_settings({"region": "eu-west-1", "ssm_role": "R"}, sf)  # file from before the MFA option existed
+assert app.load_settings(sf) == {"mfa": True, "region": "eu-west-1", "ssm_role": "R"}
+app.save_settings({"mfa": False, "region": "eu-west-1", "ssm_role": ""}, sf)
+assert app.load_settings(sf)["mfa"] is False
 open(sf, "w").write("{broken")
 assert app.load_settings(sf) == app.DEFAULT_SETTINGS  # corrupt file -> defaults, no crash
 
@@ -262,6 +265,8 @@ calls = []
 real_load_key, real_assume, real_aws_cls = app.load_key, app.assume, app.Aws
 app.Aws = lambda log, settings, session: ("client-for", session)
 app.assume = lambda record, code, region: (calls.append(code) or "SESSION", datetime.now(timezone.utc) + timedelta(hours=1))
+real_settings = app.load_settings
+app.load_settings = lambda: {"mfa": True, "region": "ap-south-1", "ssm_role": ""}
 b = app.App.__new__(app.App)
 b.q, b.log, b.session, b.session_expiry = queue.Queue(), (lambda m: None), None, None
 app.load_key = lambda: None
@@ -269,7 +274,12 @@ try:
     b.aws(); raise AssertionError("no key saved -> must not proceed")
 except app.NoKeyError:
     pass
-app.load_key = lambda: {"key_id": "k"}
+app.load_key = lambda: {"key_id": "k"}  # saved without MFA, but MFA now required -> must re-save
+try:
+    b.aws(); raise AssertionError("MFA on with a no-MFA key must not proceed")
+except app.NoKeyError:
+    pass
+app.load_key = lambda: {"key_id": "k", "role_arn": "arn:aws:iam::1:role/r", "mfa_serial": "m"}
 b.ask_mfa = lambda: None  # user pressed Cancel
 try:
     b.aws(); raise AssertionError("cancelled sign-in must not proceed")
@@ -281,7 +291,15 @@ assert calls == ["123456"], "one MFA prompt per session, not per action"
 b.session_expiry = datetime.now(timezone.utc) + timedelta(minutes=2)  # about to expire -> sign in again
 b.aws()
 assert calls == ["123456", "123456"]
+# MFA turned off: the key is used directly, never a code prompt, and the session does not expire
+real_key_session = app.key_session
+app.key_session = lambda record: "KEY-SESSION"
+app.load_settings = lambda: {"mfa": False, "region": "ap-south-1", "ssm_role": ""}
+b.session, b.session_expiry, calls[:] = None, None, []
+b.ask_mfa = lambda: (_ for _ in ()).throw(AssertionError("must not ask for MFA when it is off"))
+assert b.aws() == ("client-for", "KEY-SESSION") and b.session_valid() and calls == []
 app.load_key, app.assume, app.Aws = real_load_key, real_assume, real_aws_cls
+app.load_settings, app.key_session = real_settings, real_key_session
 try:
     app.assume({"key_id": "k"}, "12ab56", "ap-south-1"); raise AssertionError("bad MFA code format accepted")
 except ValueError:

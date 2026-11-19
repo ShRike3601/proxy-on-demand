@@ -46,7 +46,7 @@ LOCAL = os.environ.get("LOCALAPPDATA", "")
 APP_DIR = os.path.join(LOCAL, "proxy-on-demand")
 APP_LOG = os.path.join(APP_DIR, "app.log")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
-DEFAULT_SETTINGS = {"region": "ap-south-1", "ssm_role": ""}
+DEFAULT_SETTINGS = {"mfa": True, "region": "ap-south-1", "ssm_role": ""}  # MFA on unless the user opts out
 KEY_FILE = os.path.join(APP_DIR, "aws-key.bin")  # DPAPI-encrypted, readable only by this Windows user
 DPAPI_ENTROPY = b"proxy-on-demand/aws-key/v1"
 PLAINTEXT_CRED_FILE = os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or \
@@ -192,10 +192,11 @@ def validate_key(key_id, secret):
         raise ValueError("The secret access key should be 40 characters.")
 
 
-# The stored key can do nothing except assume ROLE_NAME, and the role demands a fresh MFA code.
-# The resulting 1-hour credentials live only in memory. On disk the key is encrypted with Windows
-# DPAPI: unreadable from a copied disk, backup or cloud sync. (Malware running as you could still
-# decrypt it - which is exactly why the key alone is useless without your phone.)
+# With MFA (default): the stored key can do nothing except assume ROLE_NAME, and the role demands a
+# fresh MFA code. The resulting 1-hour credentials live only in memory.
+# Without MFA (opt-out): the key's own user holds the least-privilege EC2 policy and is used directly.
+# Either way the key is encrypted on disk with Windows DPAPI: unreadable from a copied disk, backup or
+# cloud sync. (Malware running as you could still decrypt it - which is what MFA protects against.)
 
 class _Blob(ctypes.Structure):
     _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_char))]
@@ -274,8 +275,15 @@ def assume(record, code, region):
     return session, c["Expiration"]
 
 
-def inspect_key(key_id, secret):
-    """Look up who the key belongs to and its MFA device. Returns (record, warnings); raises if unusable."""
+def key_session(record):
+    """No-MFA mode: use the stored key directly."""
+    import boto3
+    return boto3.Session(aws_access_key_id=record["key_id"], aws_secret_access_key=record["secret"])
+
+
+def inspect_key(key_id, secret, mfa=True, region=DEFAULT_SETTINGS["region"]):
+    """Look up who the key belongs to (and its MFA device, in MFA mode). Returns (record, warnings);
+    raises if the key is unusable."""
     import boto3
     from botocore.exceptions import ClientError
     validate_key(key_id, secret)
@@ -295,15 +303,23 @@ def inspect_key(key_id, secret):
                         "Use the dedicated user from the README, which can do nothing without your MFA code.")
     except ClientError:
         pass
+    record = {"key_id": key_id, "secret": secret, "user_arn": arn}
+    if not mfa:
+        try:
+            s.client("ec2", region_name=region).describe_instances(MaxResults=5)
+        except ClientError:
+            warnings.append(f"This key cannot use EC2 in {region}. Attach the policy from "
+                            "'Copy user policy' to this user (README, setup without MFA).")
+        return record, warnings
     try:
         devices = s.client("iam").list_mfa_devices(UserName=user)["MFADevices"]
     except ClientError as e:
         raise RuntimeError("This key cannot look up its MFA device. Attach the key policy "
-                           "(AWS settings > Copy key policy) to this user.") from e
+                           "(AWS settings > Copy user policy) to this user.") from e
     if not devices:
-        raise RuntimeError(f"The user {user} has no MFA device. Add a virtual MFA device to it (README, step 6).")
-    record = {"key_id": key_id, "secret": secret, "mfa_serial": devices[0]["SerialNumber"],
-              "role_arn": f"arn:aws:iam::{account}:role/{ROLE_NAME}", "user_arn": arn}
+        raise RuntimeError(f"The user {user} has no MFA device. Add a virtual MFA device to it (README, step 6), "
+                           "or untick 'Require MFA' in AWS settings.")
+    record.update(mfa_serial=devices[0]["SerialNumber"], role_arn=f"arn:aws:iam::{account}:role/{ROLE_NAME}")
     return record, warnings
 
 
@@ -670,8 +686,10 @@ class App:
         self.run(lambda: self.report(self.aws()))
 
     def session_valid(self):
-        return self.session is not None and \
-            (self.session_expiry - datetime.now(timezone.utc)).total_seconds() > 300
+        if self.session is None:
+            return False
+        return self.session_expiry is None or \
+            (self.session_expiry - datetime.now(timezone.utc)).total_seconds() > 300  # None: no-MFA key
 
     def ask_mfa(self):
         """Called from the worker thread: ask the UI thread for an MFA code and wait for the answer."""
@@ -686,6 +704,12 @@ class App:
             record = load_key()
             if not record:
                 raise NoKeyError("No AWS key saved yet. Open AWS settings.")
+            if not settings["mfa"]:
+                self.session, self.session_expiry = key_session(record), None
+                return Aws(self.log, settings, self.session)
+            if "role_arn" not in record:
+                raise NoKeyError("MFA is turned on, but the saved key was set up without it. "
+                                 "Open AWS settings and save again.")
             code = self.ask_mfa()
             if code is None:
                 raise SignInCancelled("Not signed in. Press Refresh or Start to sign in with your MFA code.")
@@ -702,12 +726,17 @@ class App:
         w.transient(self.root)
         w.grab_set()
         w.resizable(False, False)
+        mfa = tk.BooleanVar(value=s["mfa"])
+        tk.Checkbutton(w, text="Require MFA (recommended)", variable=mfa, font=("Segoe UI", 10, "bold"),
+                       command=lambda: update_mode()).grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
+        mode_note = tk.Label(w, fg="gray", justify="left", anchor="w")
+        mode_note.grid(row=1, column=0, columnspan=2, sticky="w", padx=26, pady=(0, 8))
         fields = {}
         rows = (("Region", "region", s["region"], ""),
                 ("Session Manager role (optional)", "ssm_role", s["ssm_role"], ""),
                 ("Access key ID", "key_id", "", ""),
                 ("Secret access key", "secret", "", "•"))
-        for r, (label, key, value, show) in enumerate(rows):
+        for r, (label, key, value, show) in enumerate(rows, start=2):
             tk.Label(w, text=label, anchor="w").grid(row=r, column=0, sticky="w", padx=10, pady=4)
             e = tk.Entry(w, width=46, show=show)
             e.insert(0, value)
@@ -715,9 +744,8 @@ class App:
             fields[key] = e
         tk.Label(w, fg="gray", justify="left", text=(
             "Leave both key fields empty to keep the key already saved.\n"
-            "The key is stored encrypted for your Windows account and is never shown again.\n"
-            "On its own it can do nothing: every sign-in also needs the MFA code from your phone.")
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10)
+            "The key is stored encrypted for your Windows account and is never shown again.")
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=10)
 
         def region_ok():
             region = fields["region"].get().strip()
@@ -743,9 +771,27 @@ class App:
             return load_key()
 
         def copy_key_policy():
-            copy(json.dumps(key_policy(), indent=2), "Key policy",
-                 "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-key, "
-                 "and attach it to the proxy-on-demand user (README step 5).")
+            if mfa.get():
+                copy(json.dumps(key_policy(), indent=2), "User policy",
+                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-key, "
+                     "and attach it to the proxy-on-demand user (README step 5).")
+                return
+            region = region_ok()
+            if region:  # no MFA: the user itself holds the least-privilege EC2 permissions
+                copy(json.dumps(iam_policy(region, fields["ssm_role"].get().strip()), indent=2), "User policy",
+                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-ec2, "
+                     "and attach it to the proxy-on-demand user (README, setup without MFA).")
+
+        def update_mode():
+            on = mfa.get()
+            mode_note.config(text=(
+                "Your access key alone can do nothing: each sign-in also needs a code from your phone,\n"
+                "and AWS access lasts 1 hour, in memory only. Best if your laptop could ever be compromised."
+                if on else
+                "The key itself holds the app's least-privilege permissions; no phone codes.\n"
+                "Anyone who gets the key can start and delete the app's small servers (all other safeguards stay)."))
+            for b in role_buttons:
+                b.config(state="normal" if on else "disabled")
 
         def copy_role_permissions():
             region = region_ok()
@@ -774,11 +820,14 @@ class App:
                 return messagebox.showerror("AWS settings", "Press Stop before changing the region, "
                                             "so the server in the current region is terminated.", parent=w)
             key_id, secret = fields["key_id"].get().strip(), fields["secret"].get().strip()
+            saved = load_key()
+            if not (key_id or secret) and saved and mfa.get() != s["mfa"]:
+                key_id, secret = saved["key_id"], saved["secret"]  # MFA switched: re-check the saved key
             if key_id or secret:
                 w.config(cursor="watch")
                 w.update()
                 try:
-                    record, warnings = inspect_key(key_id, secret)
+                    record, warnings = inspect_key(key_id, secret, mfa.get(), region)
                 except Exception as e:
                     return messagebox.showerror("AWS settings", f"This key cannot be used:\n\n{e}", parent=w)
                 finally:
@@ -787,21 +836,24 @@ class App:
                         "Key works, but...", "\n\n".join(warnings) + "\n\nSave this key anyway?", parent=w):
                     return
                 save_key(record)
-                self.session = None  # new key: sign in again
                 self.log(f"AWS key saved, encrypted (user {record['user_arn'].split('/')[-1]})")
-            save_settings({"region": region, "ssm_role": role})
+            save_settings({"mfa": mfa.get(), "region": region, "ssm_role": role})
+            self.session = None  # settings or key changed: sign in again
             w.destroy()
-            self.refresh()  # asks for the MFA code and proves the whole setup works
+            self.refresh()  # signs in (with the MFA code if enabled) and proves the whole setup works
 
         bar = tk.Frame(w)
-        bar.grid(row=5, column=0, columnspan=2, pady=(10, 4))
-        tk.Button(bar, text="Copy key policy", command=copy_key_policy).pack(side="left", padx=4)
-        tk.Button(bar, text="Copy role trust policy", command=copy_trust_policy).pack(side="left", padx=4)
-        tk.Button(bar, text="Copy role permissions", command=copy_role_permissions).pack(side="left", padx=4)
+        bar.grid(row=7, column=0, columnspan=2, pady=(10, 4))
+        tk.Button(bar, text="Copy user policy", command=copy_key_policy).pack(side="left", padx=4)
+        role_buttons = [tk.Button(bar, text="Copy role trust policy", command=copy_trust_policy),
+                        tk.Button(bar, text="Copy role permissions", command=copy_role_permissions)]
+        for b in role_buttons:
+            b.pack(side="left", padx=4)
         bar2 = tk.Frame(w)
-        bar2.grid(row=6, column=0, columnspan=2, pady=(4, 10))
+        bar2.grid(row=8, column=0, columnspan=2, pady=(4, 10))
         tk.Button(bar2, text="Save and sign in", command=save).pack(side="left", padx=6)
         tk.Button(bar2, text="Cancel", command=w.destroy).pack(side="left", padx=6)
+        update_mode()
 
     def start(self):
         def job():
