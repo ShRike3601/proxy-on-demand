@@ -5,10 +5,10 @@ points the local sing-box config at its new public IP, and starts sing-box.
 Stop:  stops sing-box, then terminates the server. Termination releases the public IP
 and deletes the disk, so nothing keeps billing.
 
-The AWS key is entered in the app (AWS settings) and stored in the standard AWS
-credentials file under the [proxy-on-demand] profile. The Shadowsocks password lives
-only in the local sing-box config (created with a random password) and is never shown.
-See README.md.
+AWS access: the stored key (DPAPI-encrypted) can only assume one role, and only with a
+6-digit MFA code from your phone. The resulting 1-hour credentials live in memory only.
+The Shadowsocks password lives only in the local sing-box config (created with a random
+password) and is never shown. See README.md.
 """
 import base64
 import configparser
@@ -29,9 +29,11 @@ import tkinter as tk
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
-from tkinter import messagebox, scrolledtext
+from tkinter import messagebox, scrolledtext, simpledialog
 
-PROFILE = "proxy-on-demand"       # section in the AWS credentials file
+ROLE_NAME = "proxy-on-demand-role"  # IAM role holding the app's EC2 permissions; assumable only with MFA
+SESSION_SECONDS = 3600              # temporary credentials last 1 hour, in memory only
+OLD_PROFILE = "proxy-on-demand"     # plain-text profile used by earlier versions; removed on first save
 APP_TAG = "ss-proxy-app"          # every resource we create is tagged app=ss-proxy-app
 INSTANCE_TYPE = "t3.micro"
 PORT = 443
@@ -45,7 +47,10 @@ APP_DIR = os.path.join(LOCAL, "proxy-on-demand")
 APP_LOG = os.path.join(APP_DIR, "app.log")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 DEFAULT_SETTINGS = {"region": "ap-south-1", "ssm_role": ""}
-CRED_FILE = os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or os.path.join(os.path.expanduser("~"), ".aws", "credentials")
+KEY_FILE = os.path.join(APP_DIR, "aws-key.bin")  # DPAPI-encrypted, readable only by this Windows user
+DPAPI_ENTROPY = b"proxy-on-demand/aws-key/v1"
+PLAINTEXT_CRED_FILE = os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or \
+    os.path.join(os.path.expanduser("~"), ".aws", "credentials")
 SB_DIR = os.path.join(LOCAL, "sing-box")
 SB_CONFIG = os.path.join(SB_DIR, "config.json")
 SB_LOG = os.path.join(SB_DIR, "sing-box.log")
@@ -187,43 +192,137 @@ def validate_key(key_id, secret):
         raise ValueError("The secret access key should be 40 characters.")
 
 
-def save_key(key_id, secret, path=CRED_FILE):
-    """Store the key in the standard AWS credentials file; other profiles are kept."""
-    validate_key(key_id, secret)
-    cp = configparser.RawConfigParser()
-    cp.read(path, encoding="utf-8")
-    if not cp.has_section(PROFILE):
-        cp.add_section(PROFILE)
-    cp.set(PROFILE, "aws_access_key_id", key_id)
-    cp.set(PROFILE, "aws_secret_access_key", secret)
+# The stored key can do nothing except assume ROLE_NAME, and the role demands a fresh MFA code.
+# The resulting 1-hour credentials live only in memory. On disk the key is encrypted with Windows
+# DPAPI: unreadable from a copied disk, backup or cloud sync. (Malware running as you could still
+# decrypt it - which is exactly why the key alone is useless without your phone.)
+
+class _Blob(ctypes.Structure):
+    _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _dpapi(data, protect):
+    buf = ctypes.create_string_buffer(data, len(data))
+    ent = ctypes.create_string_buffer(DPAPI_ENTROPY, len(DPAPI_ENTROPY))
+    blob_in = _Blob(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_ent = _Blob(len(DPAPI_ENTROPY), ctypes.cast(ent, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _Blob()
+    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(blob_in), None, ctypes.byref(blob_ent), None, None, 0x1,  # 0x1: never show UI
+              ctypes.byref(blob_out)):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def save_key(record, path=KEY_FILE):
+    """record: key_id, secret, mfa_serial, role_arn. Written DPAPI-encrypted, atomically."""
+    validate_key(record["key_id"], record["secret"])
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        cp.write(f)
+    with open(tmp, "wb") as f:
+        f.write(_dpapi(json.dumps(record).encode(), protect=True))
     os.replace(tmp, path)
+    remove_plaintext_profile()
 
 
-def check_key(key_id, secret, region):
-    """Test a key live. Returns (identity ARN, list of warnings). Raises if the key does not work at all."""
+def load_key(path=KEY_FILE):
+    try:
+        with open(path, "rb") as f:
+            return json.loads(_dpapi(f.read(), protect=False))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        raise RuntimeError("The saved AWS key could not be decrypted (was it copied from another "
+                           "Windows account?). Enter it again in AWS settings.") from e
+
+
+def remove_plaintext_profile(path=PLAINTEXT_CRED_FILE):
+    """Earlier versions stored the key in plain text in the AWS credentials file; remove only that profile."""
+    cp = configparser.RawConfigParser()
+    try:
+        cp.read(path, encoding="utf-8")
+    except configparser.Error:
+        return
+    if cp.remove_section(OLD_PROFILE):
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            cp.write(f)
+        os.replace(tmp, path)
+
+
+def assume(record, code, region):
+    """Trade the stored key + MFA code for 1-hour credentials. Returns a boto3 Session and its expiry."""
     import boto3
     from botocore.exceptions import ClientError
-    s = boto3.Session(aws_access_key_id=key_id, aws_secret_access_key=secret, region_name=region)
-    arn = s.client("sts").get_caller_identity()["Arn"]
+    if not re.fullmatch(r"\d{6}", code or ""):
+        raise ValueError("The MFA code is the 6-digit number from your authenticator app.")
+    sts = boto3.Session(aws_access_key_id=record["key_id"], aws_secret_access_key=record["secret"],
+                        region_name=region).client("sts")
+    try:
+        c = sts.assume_role(RoleArn=record["role_arn"], RoleSessionName="proxy-on-demand",
+                            SerialNumber=record["mfa_serial"], TokenCode=code,
+                            DurationSeconds=SESSION_SECONDS)["Credentials"]
+    except ClientError as e:
+        raise RuntimeError("AWS refused the sign-in. Either the MFA code was wrong or expired (wait for the "
+                           f"next code), or the role {ROLE_NAME} is missing or does not trust this user "
+                           f"(README, step 7).\n\nAWS said: {e.response['Error']['Message']}") from e
+    session = boto3.Session(aws_access_key_id=c["AccessKeyId"], aws_secret_access_key=c["SecretAccessKey"],
+                            aws_session_token=c["SessionToken"], region_name=region)
+    return session, c["Expiration"]
+
+
+def inspect_key(key_id, secret):
+    """Look up who the key belongs to and its MFA device. Returns (record, warnings); raises if unusable."""
+    import boto3
+    from botocore.exceptions import ClientError
+    validate_key(key_id, secret)
+    s = boto3.Session(aws_access_key_id=key_id, aws_secret_access_key=secret, region_name="us-east-1")
+    try:
+        arn = s.client("sts").get_caller_identity()["Arn"]
+    except ClientError as e:
+        raise RuntimeError(f"AWS does not accept this key: {e.response['Error']['Message']}") from e
+    if ":user/" not in arn:
+        raise RuntimeError("This is a root key. Never use root keys: delete it and create the IAM user "
+                           "described in the README instead.")
+    account, user = arn.split(":")[4], arn.split("/")[-1]
     warnings = []
-    if arn.endswith(":root"):
-        warnings.append("This is a ROOT user key. Never use root keys: delete it and create an IAM user instead.")
     try:
         s.client("iam").list_users(MaxItems=1)
-        warnings.append("This key has broad admin rights. If it leaked, anyone could run up a large bill. "
-                        "Use a key from a user that has only the app's IAM policy.")
+        warnings.append("This key has admin rights. If it leaked, anyone could use your whole AWS account. "
+                        "Use the dedicated user from the README, which can do nothing without your MFA code.")
     except ClientError:
         pass
     try:
-        s.client("ec2").describe_instances(MaxResults=5)
-    except ClientError:
-        warnings.append(f"This key cannot use EC2 in {region}. Attach the app's IAM policy "
-                        "(AWS settings > Copy IAM policy) to this user.")
-    return arn, warnings
+        devices = s.client("iam").list_mfa_devices(UserName=user)["MFADevices"]
+    except ClientError as e:
+        raise RuntimeError("This key cannot look up its MFA device. Attach the key policy "
+                           "(AWS settings > Copy key policy) to this user.") from e
+    if not devices:
+        raise RuntimeError(f"The user {user} has no MFA device. Add a virtual MFA device to it (README, step 6).")
+    record = {"key_id": key_id, "secret": secret, "mfa_serial": devices[0]["SerialNumber"],
+              "role_arn": f"arn:aws:iam::{account}:role/{ROLE_NAME}", "user_arn": arn}
+    return record, warnings
+
+
+def key_policy():
+    """For the IAM user that owns the stored key: it can only assume the app role and find its own MFA device."""
+    return {"Version": "2012-10-17", "Statement": [
+        {"Sid": "AssumeAppRoleOnly", "Effect": "Allow", "Action": "sts:AssumeRole",
+         "Resource": f"arn:aws:iam::*:role/{ROLE_NAME}"},
+        {"Sid": "FindOwnMfaDevice", "Effect": "Allow", "Action": "iam:ListMFADevices",
+         "Resource": "arn:aws:iam::*:user/${aws:username}"}]}
+
+
+def trust_policy(user_arn):
+    """For the app role: only this one user, only with MFA used in the last hour. Naming the user (not the
+    whole account) matters: any identity that can create MFA devices could otherwise satisfy an MFA check."""
+    return {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Principal": {"AWS": user_arn}, "Action": "sts:AssumeRole",
+         "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"},
+                       "NumericLessThan": {"aws:MultiFactorAuthAge": "3600"}}}]}
 
 
 def iam_policy(region, ssm_role=""):
@@ -257,6 +356,10 @@ def iam_policy(region, ssm_role=""):
 
 
 class NoKeyError(RuntimeError):
+    pass
+
+
+class SignInCancelled(RuntimeError):
     pass
 
 
@@ -347,15 +450,10 @@ echo SS-SETUP-DONE
 
 
 class Aws:
-    def __init__(self, log, settings):
-        import boto3  # imported here so the UI can still open and explain a missing install
-        from botocore.exceptions import ProfileNotFound
+    def __init__(self, log, settings, session):
         self.region, self.ssm_role = settings["region"], settings["ssm_role"]
-        try:
-            s = boto3.Session(profile_name=PROFILE, region_name=self.region)
-        except ProfileNotFound as e:
-            raise NoKeyError("No AWS access key saved yet. Open AWS settings.") from e
-        self.ec2, self.ssm = s.client("ec2"), s.client("ssm")
+        self.ec2 = session.client("ec2", region_name=self.region)
+        self.ssm = session.client("ssm", region_name=self.region)
         self.log = log
 
     def instances(self):
@@ -470,6 +568,7 @@ class App:
     def __init__(self, root):
         self.root, self.q, self.busy, self.warp_was_on = root, queue.Queue(), False, False
         self.server_up, self.first_check = False, True
+        self.session, self.session_expiry = None, None  # temporary AWS credentials, memory only
         os.makedirs(os.path.dirname(APP_LOG), exist_ok=True)
         root.title("Proxy on demand")
         root.geometry("700x420")
@@ -511,6 +610,11 @@ class App:
                 messagebox.showwarning("Proxy on demand", msg)
             elif kind == "setup":
                 self.root.after(100, self.settings_dialog)  # after "done" re-enables the buttons
+            elif kind == "mfa":
+                done, box = msg
+                box["code"] = simpledialog.askstring(
+                    "Sign in to AWS", "Enter the 6-digit code from your authenticator app:", parent=self.root)
+                done.set()
             elif kind == "done":
                 self.busy = False
                 for b in self.buttons:
@@ -536,6 +640,9 @@ class App:
                 self.log(str(e))
                 self.set_status("Set up your AWS key to begin")
                 self.q.put(("setup", ""))
+            except SignInCancelled as e:
+                self.log(str(e))
+                self.set_status("Signed out - press Refresh to sign in")
             except Exception as e:  # show every failure instead of dying silently
                 self.log(f"ERROR: {e}")
                 self.set_status("Error - see log")
@@ -562,8 +669,29 @@ class App:
     def refresh(self):
         self.run(lambda: self.report(self.aws()))
 
+    def session_valid(self):
+        return self.session is not None and \
+            (self.session_expiry - datetime.now(timezone.utc)).total_seconds() > 300
+
+    def ask_mfa(self):
+        """Called from the worker thread: ask the UI thread for an MFA code and wait for the answer."""
+        done, box = threading.Event(), {}
+        self.q.put(("mfa", (done, box)))
+        done.wait()
+        return box.get("code")
+
     def aws(self):
-        return Aws(self.log, load_settings())
+        settings = load_settings()
+        if not self.session_valid():
+            record = load_key()
+            if not record:
+                raise NoKeyError("No AWS key saved yet. Open AWS settings.")
+            code = self.ask_mfa()
+            if code is None:
+                raise SignInCancelled("Not signed in. Press Refresh or Start to sign in with your MFA code.")
+            self.session, self.session_expiry = assume(record, code.strip(), settings["region"])
+            self.log(f"Signed in with MFA until {self.session_expiry.astimezone():%H:%M} (credentials kept in memory only)")
+        return Aws(self.log, settings, self.session)
 
     def settings_dialog(self):
         if self.busy:
@@ -587,52 +715,93 @@ class App:
             fields[key] = e
         tk.Label(w, fg="gray", justify="left", text=(
             "Leave both key fields empty to keep the key already saved.\n"
-            f"The key is stored in {CRED_FILE} [{PROFILE}];\nthe secret is never shown again.")
+            "The key is stored encrypted for your Windows account and is never shown again.\n"
+            "On its own it can do nothing: every sign-in also needs the MFA code from your phone.")
         ).grid(row=4, column=0, columnspan=2, sticky="w", padx=10)
 
-        def copy_policy():
+        def region_ok():
             region = fields["region"].get().strip()
             if not valid_region(region):
-                return messagebox.showerror("AWS settings", "Enter a region code such as ap-south-1.", parent=w)
-            policy = json.dumps(iam_policy(region, fields["ssm_role"].get().strip()), indent=2)
+                messagebox.showerror("AWS settings", "Enter a region code such as ap-south-1.", parent=w)
+                return None
+            return region
+
+        def copy(text, title, where):
             self.root.clipboard_clear()
-            self.root.clipboard_append(policy)
-            messagebox.showinfo("IAM policy copied", "Copied. In the AWS console: IAM > Policies > Create policy > "
-                                "JSON, paste it, save it, then attach it to the user that owns your access key.",
-                                parent=w)
+            self.root.clipboard_append(text)
+            messagebox.showinfo(title, "Copied to the clipboard.\n\n" + where, parent=w)
+
+        def typed_or_saved_record():
+            key_id, secret = fields["key_id"].get().strip(), fields["secret"].get().strip()
+            if key_id or secret:
+                w.config(cursor="watch")
+                w.update()
+                try:
+                    return inspect_key(key_id, secret)[0]
+                finally:
+                    w.config(cursor="")
+            return load_key()
+
+        def copy_key_policy():
+            copy(json.dumps(key_policy(), indent=2), "Key policy",
+                 "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-key, "
+                 "and attach it to the proxy-on-demand user (README step 5).")
+
+        def copy_role_permissions():
+            region = region_ok()
+            if region:
+                copy(json.dumps(iam_policy(region, fields["ssm_role"].get().strip()), indent=2),
+                     "Role permissions", "IAM > Policies > Create policy > JSON: paste and name it "
+                     "proxy-on-demand-ec2 (README step 7).")
+
+        def copy_trust_policy():
+            try:
+                record = typed_or_saved_record()
+            except Exception as e:
+                return messagebox.showerror("AWS settings", str(e), parent=w)
+            if not record:
+                return messagebox.showerror("AWS settings", "Enter the access key first: the trust policy "
+                                            "names the user that owns it.", parent=w)
+            copy(json.dumps(trust_policy(record["user_arn"]), indent=2), "Role trust policy",
+                 f"IAM > Roles > Create role > Custom trust policy: paste, attach proxy-on-demand-ec2, "
+                 f"and name the role {ROLE_NAME} (README step 7).")
 
         def save():
-            region, role = fields["region"].get().strip(), fields["ssm_role"].get().strip()
-            key_id, secret = fields["key_id"].get().strip(), fields["secret"].get().strip()
-            if not valid_region(region):
-                return messagebox.showerror("AWS settings", "Enter a region code such as ap-south-1.", parent=w)
+            region, role = region_ok(), fields["ssm_role"].get().strip()
+            if not region:
+                return
             if region != s["region"] and self.server_up:  # would orphan a billing server in the old region
                 return messagebox.showerror("AWS settings", "Press Stop before changing the region, "
                                             "so the server in the current region is terminated.", parent=w)
+            key_id, secret = fields["key_id"].get().strip(), fields["secret"].get().strip()
             if key_id or secret:
+                w.config(cursor="watch")
+                w.update()
                 try:
-                    validate_key(key_id, secret)
-                    w.config(cursor="watch")
-                    w.update()
-                    arn, warnings = check_key(key_id, secret, region)
+                    record, warnings = inspect_key(key_id, secret)
                 except Exception as e:
+                    return messagebox.showerror("AWS settings", f"This key cannot be used:\n\n{e}", parent=w)
+                finally:
                     w.config(cursor="")
-                    return messagebox.showerror("AWS settings", f"This key does not work:\n{e}", parent=w)
-                w.config(cursor="")
                 if warnings and not messagebox.askyesno(
                         "Key works, but...", "\n\n".join(warnings) + "\n\nSave this key anyway?", parent=w):
                     return
-                save_key(key_id, secret)
-                self.log(f"AWS key saved and tested ({arn.split(':')[-1]})")
+                save_key(record)
+                self.session = None  # new key: sign in again
+                self.log(f"AWS key saved, encrypted (user {record['user_arn'].split('/')[-1]})")
             save_settings({"region": region, "ssm_role": role})
             w.destroy()
-            self.refresh()
+            self.refresh()  # asks for the MFA code and proves the whole setup works
 
         bar = tk.Frame(w)
-        bar.grid(row=5, column=0, columnspan=2, pady=10)
-        tk.Button(bar, text="Copy IAM policy", command=copy_policy).pack(side="left", padx=6)
-        tk.Button(bar, text="Save and test", command=save).pack(side="left", padx=6)
-        tk.Button(bar, text="Cancel", command=w.destroy).pack(side="left", padx=6)
+        bar.grid(row=5, column=0, columnspan=2, pady=(10, 4))
+        tk.Button(bar, text="Copy key policy", command=copy_key_policy).pack(side="left", padx=4)
+        tk.Button(bar, text="Copy role trust policy", command=copy_trust_policy).pack(side="left", padx=4)
+        tk.Button(bar, text="Copy role permissions", command=copy_role_permissions).pack(side="left", padx=4)
+        bar2 = tk.Frame(w)
+        bar2.grid(row=6, column=0, columnspan=2, pady=(4, 10))
+        tk.Button(bar2, text="Save and sign in", command=save).pack(side="left", padx=6)
+        tk.Button(bar2, text="Cancel", command=w.destroy).pack(side="left", padx=6)
 
     def start(self):
         def job():
@@ -714,7 +883,7 @@ class App:
             if left:
                 self.log(f"WARNING: still exists after Stop: {', '.join(left)}")
                 self.q.put(("warn", f"These still exist and may bill:\n{', '.join(left)}\n\n"
-                                    "Press Stop again, or delete them in the EC2 console (Mumbai)."))
+                                    f"Press Stop again, or delete them in the EC2 console ({aws.region})."))
             else:
                 self.log("Verified: no proxy servers or disks left. Nothing is billing.")
         self.run(job)
@@ -722,7 +891,11 @@ class App:
     def tick(self):
         """While a server exists, refresh the status (uptime and cost) every 5 minutes."""
         if self.server_up and not self.busy:
-            self.refresh()
+            if self.session_valid():  # never pop up an MFA prompt from a background timer
+                self.refresh()
+            else:
+                self.set_status("Signed out (the 1-hour sign-in ended). Your server may still be running and "
+                                "billing:\npress Refresh to sign in and check, or Stop to end it.")
         self.root.after(300_000, self.tick)
 
     def on_close(self):

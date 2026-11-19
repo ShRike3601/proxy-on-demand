@@ -80,19 +80,47 @@ for bad in [("ASIA" + "A" * 16, GOOD_SECRET), ("AKIA123", GOOD_SECRET), (GOOD_ID
         app.validate_key(*bad); raise AssertionError(f"accepted bad key {bad[0][:6]}")
     except ValueError:
         pass
+# Encrypted key store: round-trips, never holds the secret in plain text, fails safely
+keyf = os.path.join(d, "app", "aws-key.bin")
+assert app.load_key(keyf) is None  # nothing saved yet
 cred = os.path.join(d, ".aws", "credentials")
 os.makedirs(os.path.dirname(cred))
-open(cred, "w").write("[default]\naws_access_key_id = OTHER\n")
-app.save_key(GOOD_ID, GOOD_SECRET, cred)
+open(cred, "w").write(f"[default]\naws_access_key_id = OTHER\n\n[{app.OLD_PROFILE}]\naws_access_key_id = OLD\n")
+real_plain = app.PLAINTEXT_CRED_FILE
+app.remove_plaintext_profile.__defaults__ = (cred,)
+record = {"key_id": GOOD_ID, "secret": GOOD_SECRET, "mfa_serial": "arn:aws:iam::1:mfa/x",
+          "role_arn": "arn:aws:iam::1:role/r", "user_arn": "arn:aws:iam::1:user/u"}
+app.save_key(record, keyf)
+raw = open(keyf, "rb").read()
+assert GOOD_SECRET.encode() not in raw and GOOD_ID.encode() not in raw, "key must not be stored in plain text"
+assert app.load_key(keyf) == record
+open(keyf, "wb").write(raw[:-5] + b"xxxxx")  # tampered / copied-from-elsewhere file
+try:
+    app.load_key(keyf); raise AssertionError("tampered key file accepted")
+except RuntimeError:
+    pass
 import configparser
 cp = configparser.RawConfigParser(); cp.read(cred)
-assert cp["default"]["aws_access_key_id"] == "OTHER", "other profiles must be kept"
-assert cp[app.PROFILE]["aws_access_key_id"] == GOOD_ID and cp[app.PROFILE]["aws_secret_access_key"] == GOOD_SECRET
+assert cp.sections() == ["default"], "only the old plain-text profile of this app is removed"
+app.remove_plaintext_profile.__defaults__ = (real_plain,)
+try:
+    app.save_key({**record, "secret": "short"}, keyf); raise AssertionError("invalid key saved")
+except ValueError:
+    pass
 shutil.rmtree(d)
 
+# Policies: repo files match the code; the key alone can do nothing but assume the role
 here = os.path.dirname(os.path.abspath(__file__))
-assert json.load(open(os.path.join(here, "iam-policy.json"))) == app.iam_policy("ap-south-1"), \
-    "iam-policy.json is out of date: regenerate it from iam_policy()"
+pol = lambda name: json.load(open(os.path.join(here, "policies", name)))
+assert pol("role-permissions.json") == app.iam_policy("ap-south-1"), "regenerate policies/ from the code"
+assert pol("key-policy.json") == app.key_policy(), "regenerate policies/ from the code"
+kp = json.dumps(app.key_policy())
+assert "ec2:" not in kp and "iam:PassRole" not in kp and "sts:AssumeRole" in kp
+assert f"role/{app.ROLE_NAME}" in kp
+tp = app.trust_policy("arn:aws:iam::1:user/u")["Statement"][0]
+assert tp["Principal"] == {"AWS": "arn:aws:iam::1:user/u"}, "trust only the one user, not the whole account"
+assert tp["Condition"]["Bool"]["aws:MultiFactorAuthPresent"] == "true"
+assert int(tp["Condition"]["NumericLessThan"]["aws:MultiFactorAuthAge"]) <= 3600
 p = app.iam_policy("eu-west-1", "MyRole")
 text = json.dumps(p)
 assert "ap-south-1" not in text and "eu-west-1" in text and "role/MyRole" in text
@@ -148,6 +176,7 @@ import queue
 class FakeAws:
     def __init__(self, insts=(), fail_wait_port=False):
         self.insts, self.terminated, self.launched = list(insts), [], []
+        self.region = "ap-south-1"
         self.log = lambda m: None
     def default_vpc_subnet(self): return "vpc-1", "subnet-1"
     def security_group(self, vpc): return "sg-1"
@@ -170,7 +199,8 @@ def fake_app(aws):
     a.q, a.busy, a.warp_was_on, a.server_up, a.first_check = queue.Queue(), False, False, False, False
     a.log = lambda m: None
     a.run = lambda job: job()  # synchronous, exceptions propagate
-    for name, fn in {"Aws": lambda *a: aws, "find_singbox": lambda: "sing-box.exe", "ensure_config": lambda: False,
+    a.aws = lambda: aws
+    for name, fn in {"find_singbox": lambda: "sing-box.exe", "ensure_config": lambda: False,
                      "load_config": lambda: {"outbounds": [{"tag": "ss-out", "password": "pw"}]},
                      "warp_connected": lambda: False, "stop_singbox": lambda: None, "my_ip": lambda: "1.2.3.4",
                      "singbox_running": lambda: False, "set_server": lambda ip: None,
@@ -226,6 +256,36 @@ a = fake_app(aws)
 a.first_check = True
 a.report(aws)
 assert a.server_up and any(k == "warn" and "already running" in m for k, m in kinds(a))
+
+# 6. MFA sign-in: asks once per hour, cancel means no AWS access, nothing without a saved key
+calls = []
+real_load_key, real_assume, real_aws_cls = app.load_key, app.assume, app.Aws
+app.Aws = lambda log, settings, session: ("client-for", session)
+app.assume = lambda record, code, region: (calls.append(code) or "SESSION", datetime.now(timezone.utc) + timedelta(hours=1))
+b = app.App.__new__(app.App)
+b.q, b.log, b.session, b.session_expiry = queue.Queue(), (lambda m: None), None, None
+app.load_key = lambda: None
+try:
+    b.aws(); raise AssertionError("no key saved -> must not proceed")
+except app.NoKeyError:
+    pass
+app.load_key = lambda: {"key_id": "k"}
+b.ask_mfa = lambda: None  # user pressed Cancel
+try:
+    b.aws(); raise AssertionError("cancelled sign-in must not proceed")
+except app.SignInCancelled:
+    pass
+b.ask_mfa = lambda: "123456"
+assert b.aws() == ("client-for", "SESSION") and b.aws() == ("client-for", "SESSION")
+assert calls == ["123456"], "one MFA prompt per session, not per action"
+b.session_expiry = datetime.now(timezone.utc) + timedelta(minutes=2)  # about to expire -> sign in again
+b.aws()
+assert calls == ["123456", "123456"]
+app.load_key, app.assume, app.Aws = real_load_key, real_assume, real_aws_cls
+try:
+    app.assume({"key_id": "k"}, "12ab56", "ap-south-1"); raise AssertionError("bad MFA code format accepted")
+except ValueError:
+    pass
 
 # safety net is scheduled before anything that could fail
 ud = app.user_data("x")

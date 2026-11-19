@@ -1,0 +1,17 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AssumeAppRoleOnly",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/proxy-on-demand-role"
+    },
+    {
+      "Sid": "FindOwnMfaDevice",
+      "Effect": "Allow",
+      "Action": "iam:ListMFADevices",
+      "Resource": "arn:aws:iam::*:user/${aws:username}"
+    }
+  ]
+}
