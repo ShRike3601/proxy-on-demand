@@ -1,0 +1,92 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAndCreateSg",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeSecurityGroups",
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-south-1"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchOnlyTaggedT3Micro",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:ap-south-1:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:InstanceType": "t3.micro",
+          "aws:RequestTag/app": "ss-proxy-app"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchOnlyAmazonImages",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:ap-south-1::image/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:Owner": "amazon"
+        }
+      }
+    },
+    {
+      "Sid": "LaunchSupportingResources",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:*:subnet/*",
+        "arn:aws:ec2:ap-south-1:*:network-interface/*",
+        "arn:aws:ec2:ap-south-1:*:security-group/*",
+        "arn:aws:ec2:ap-south-1:*:volume/*"
+      ]
+    },
+    {
+      "Sid": "TagOnlyAtCreation",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": [
+            "RunInstances",
+            "CreateSecurityGroup"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "OnlyAppResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupIngress"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:ResourceTag/app": "ss-proxy-app"
+        }
+      }
+    },
+    {
+      "Sid": "LatestAmazonLinuxAmi",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:ap-south-1::parameter/aws/service/ami-amazon-linux-latest/*"
+    }
+  ]
+}

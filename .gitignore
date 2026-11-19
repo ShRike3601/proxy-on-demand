@@ -1,0 +1,10 @@
+# secrets must never be committed
+.aws/
+credentials
+config.json
+*.pem
+*.log
+
+__pycache__/
+*.pyc
+.venv/
