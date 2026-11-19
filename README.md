@@ -324,3 +324,7 @@ Set `SINGBOX_EXE` to a `sing-box.exe` to also validate the generated config. `--
    - publishes a GitHub Release with the `.exe`, its SHA-256 checksum, and the changelog section as notes.
 
 Every Python dependency is pinned to an exact version (`requirements.txt`, plus `requirements-build.txt` for PyInstaller). Dependabot opens a pull request each month when updates exist.
+
+## License
+
+[MIT](LICENSE). Use, change and share it freely; keep the copyright notice. The software comes with no warranty. You are responsible for your own AWS bill and for following the rules of the networks you use it on.
