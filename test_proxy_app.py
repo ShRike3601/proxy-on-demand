@@ -357,6 +357,12 @@ try:
 except ValueError:
     pass
 
+# server setup: static (musl) build, binary checked, success only once the port really listens
+ud = app.user_data("x")
+assert "linux-musl" in ud and "linux-gnu" not in ud, "the -gnu build crash-loops on Amazon Linux 2023 (glibc too old)"
+assert ud.index("ssserver --version") < ud.index("systemctl enable")
+assert ud.index("ss -ltn") < ud.index("echo SS-SETUP-DONE") and "SS-SETUP-FAILED" in ud
+
 # safety net is scheduled before anything that could fail
 ud = app.user_data("x")
 assert ud.index("shutdown -h +") < ud.index("curl ")

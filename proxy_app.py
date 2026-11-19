@@ -450,7 +450,8 @@ def user_data(password):
     """First-boot script: install shadowsocks-rust (checksum-verified) and run it as a service."""
     ss_conf = json.dumps({"server": "0.0.0.0", "server_port": PORT, "password": password,
                           "method": METHOD, "mode": "tcp_and_udp"})
-    f = f"shadowsocks-v{SS_VERSION}.x86_64-unknown-linux-gnu.tar.xz"
+    # musl = statically linked: the -gnu build needs a newer glibc than Amazon Linux 2023 ships and crash-loops
+    f = f"shadowsocks-v{SS_VERSION}.x86_64-unknown-linux-musl.tar.xz"
     url = f"https://github.com/shadowsocks/shadowsocks-rust/releases/download/v{SS_VERSION}/{f}"
     # Heredoc bodies are not echoed by `set -x`, so the password stays out of the console log.
     return f"""#!/bin/bash
@@ -464,6 +465,7 @@ command -v xz || dnf install -y xz
 curl -fsSL --retry 5 -O {url} -O {url}.sha256
 sha256sum -c {f}.sha256
 tar -xJf {f} -C /usr/local/bin ssserver
+/usr/local/bin/ssserver --version  # fails setup right here if the binary cannot run on this system
 useradd --system --no-create-home --shell /sbin/nologin shadowsocks || true
 install -d -m 750 -g shadowsocks /etc/shadowsocks-rust
 cat > /etc/shadowsocks-rust/config.json <<'EOF'
@@ -488,6 +490,9 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now shadowsocks-server
+# "started" is not "working": only report success once the server really listens on the port
+for i in $(seq 30); do ss -ltn | grep -q ':{PORT} ' && break; sleep 1; done
+ss -ltn | grep -q ':{PORT} ' || {{ journalctl -u shadowsocks-server -n 20 --no-pager; echo SS-SETUP-FAILED; exit 1; }}
 echo SS-SETUP-DONE
 """
 
