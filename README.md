@@ -110,7 +110,7 @@ The goal: even if your laptop is fully compromised, stealing what's on it gets a
 | What's on the laptop | With MFA (default) | Without MFA |
 |---|---|---|
 | The access key | **Useless on its own.** It can only *ask* for the app's role, and AWS grants the role only with a fresh 6-digit code from your phone. The role trusts only this one user. | Works on its own, but only for what the app needs (next rows). |
-| The stored key file | Encrypted with Windows DPAPI for your Windows account (`%LOCALAPPDATA%\proxy-on-demand\aws-key.bin`). Unreadable from a stolen disk, a backup or cloud sync. Never in the app folder or in plain text. | Same. |
+| The stored key file | Encrypted with Windows DPAPI for your Windows account (`%USERPROFILE%\.proxy-on-demand\aws-key.bin`). Unreadable from a stolen disk, a backup or cloud sync. Never in the app folder or in plain text. | Same. |
 | AWS access while the app runs | Temporary 1-hour credentials, kept **only in memory**. Closing the app ends them. | The key itself, in memory. |
 | What a stolen credential can do | Only start and delete small, tagged `t3.micro` servers from Amazon images, in your one region. Nothing else in your account; no IAM rights. | Same limits. |
 | The bill | Servers delete themselves after 12 hours. The budget kill switch (Step 9) locks access automatically, and Cost Anomaly Detection emails you. | Same. |
@@ -127,7 +127,7 @@ The goal: even if your laptop is fully compromised, stealing what's on it gets a
 
 1. Creates a local proxy config with a random password, the first time only.
 2. Disconnects Cloudflare WARP if it's running, because two VPNs at once break the tunnel. Stop reconnects it.
-3. Allows **only your current public IP** into the server's port 443 (TCP and UDP). There is no SSH port.
+3. Allows **only your network's public IPs** into the server's port 443 (TCP and UDP). There is no SSH port. Campus and office networks often use several public IPs; the app detects all of them and keeps checking while the server starts.
 4. Launches an Amazon Linux 2023 `t3.micro` server. On first boot the server installs Shadowsocks-rust (checksum-verified) and runs it as a locked-down service.
 5. Connects sing-box to it, then checks that your public IP really is the server's IP. If it isn't, the app disconnects, so you keep your normal internet, and deletes the new server.
 
@@ -167,7 +167,8 @@ After Stop: nothing. The app's security group, IAM user and role are free.
 | "AWS refused the sign-in" | Wait for the next code and try again. If it keeps failing, check that the role is named exactly `proxy-on-demand-role` and uses the trust policy copied from the app (Step 7). |
 | "UnauthorizedOperation" on Start | The role's permissions policy is for a different region than the one set in the app. Copy role permissions again and update `proxy-on-demand-ec2`. |
 | "No default VPC" | Follow [Default VPCs](https://docs.aws.amazon.com/vpc/latest/userguide/work-with-default-vpc.html) to create one. |
-| "did not open in 7 min" | Server setup failed. In the EC2 console: instance → Actions → Monitor and troubleshoot → Get system log, and look for `SS-SETUP-DONE`. |
+| "did not open in 5 min" | Usually your network uses a public IP the app couldn't detect, or it blocks this traffic. Try again, or try another network such as a phone hotspot. To check the server itself, set `KEEP_FAILED_SERVER = True`, then in the EC2 console open the instance → Actions → Monitor and troubleshoot → Get system log, and look for `SS-SETUP-DONE`. |
+| Can't find the log | Click **Logs** in the app. It opens `%USERPROFILE%\.proxy-on-demand`. |
 | Connected, then it stops working | Your public IP changed. Press Start again. |
 | "Signed out" in the status line | The 1-hour sign-in ended. Press Refresh and enter a new code. |
 | "Traffic left via …" | Another VPN is active. Turn it off and press Start. |
@@ -175,15 +176,18 @@ After Stop: nothing. The app's security group, IAM user and role are free.
 
 ## Files on your laptop
 
-| What | Where |
+Everything the app stores is in one folder, `%USERPROFILE%\.proxy-on-demand` (for example `C:\Users\you\.proxy-on-demand`). The **Logs** button in the app opens it.
+
+| What | File |
 |---|---|
-| App log | `%LOCALAPPDATA%\proxy-on-demand\app.log` |
-| App settings (region, role) | `%LOCALAPPDATA%\proxy-on-demand\settings.json` |
-| AWS key, encrypted for your Windows account | `%LOCALAPPDATA%\proxy-on-demand\aws-key.bin` |
-| sing-box (downloaded by the app) | `%LOCALAPPDATA%\proxy-on-demand\sing-box\` |
-| Proxy config, which holds your proxy password | `%LOCALAPPDATA%\sing-box\config.json` |
+| App log | `app.log` |
+| App settings (MFA, region, role) | `settings.json` |
+| AWS key, encrypted for your Windows account | `aws-key.bin` |
+| sing-box (downloaded by the app), its config (holds your proxy password) and its log | `sing-box\` |
 
 None of these are inside the app folder, so sharing or committing the app folder never shares your secrets.
+
+The folder is deliberately not under `AppData`. The Microsoft Store version of Python silently redirects files written there into a hidden package folder, where you can't find them and where sing-box can't read its config.
 
 ## Advanced
 

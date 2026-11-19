@@ -39,13 +39,65 @@ aws = app.Aws.__new__(app.Aws)
 aws.log = lambda m: None
 aws.ec2 = FakeEc2([{"IpProtocol": p, "FromPort": 443, "ToPort": 443, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}
                    for p in ("tcp", "udp")])
-aws.allow_only("sg-1", "1.2.3.4")
+aws.allow_only("sg-1", {"1.2.3.4"})
 assert aws.ec2.calls == ["revoke", "auth"]
 assert sorted(r["IpProtocol"] for r in aws.ec2.perms) == ["tcp", "udp"]
 assert all(r["IpRanges"][0]["CidrIp"] == "1.2.3.4/32" and len(r["IpRanges"]) == 1 for r in aws.ec2.perms)
 aws.ec2.calls = []
-aws.allow_only("sg-1", "1.2.3.4")
+aws.allow_only("sg-1", {"1.2.3.4"})
 assert aws.ec2.calls == [], "should not touch rules that are already correct"
+aws.allow_only("sg-1", {"1.2.3.4", "5.6.7.8"})  # a network with two public IPs: both allowed, nothing else
+assert aws.ec2.calls == ["revoke", "auth"]
+assert all(sorted(x["CidrIp"] for x in r["IpRanges"]) == ["1.2.3.4/32", "5.6.7.8/32"] for r in aws.ec2.perms)
+
+# my_ips: collects every IPv4 the network shows, ignores junk and failures
+import itertools
+real_urlopen = app.urllib.request.urlopen
+class R:
+    def __init__(self, b): self.b = b
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+    def read(self): return self.b
+replies = itertools.cycle([b"103.0.0.1\n", b"123.0.0.2", b"2001:db8::1", OSError("down"), b"<html>"])
+def fake_open(url, timeout):
+    x = next(replies)
+    if isinstance(x, Exception): raise x
+    return R(x)
+app.urllib.request.urlopen = fake_open
+assert app.my_ips() == {"103.0.0.1", "123.0.0.2"}
+app.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(OSError("offline"))
+try:
+    app.my_ips(); raise AssertionError("no IP found must be an error")
+except RuntimeError:
+    pass
+app.urllib.request.urlopen = real_urlopen
+
+# wait_port: re-checks the allowed IPs every 30 s while waiting, gives up after the timeout
+clock = [0.0]
+real_time, real_sleep, real_conn = app.time.time, app.time.sleep, app.socket.create_connection
+app.time.time = lambda: clock[0]
+app.time.sleep = lambda s: clock.__setitem__(0, clock[0] + s)
+app.socket.create_connection = lambda *a: (_ for _ in ()).throw(OSError("refused"))
+rechecks = []
+try:
+    app.wait_port("9.9.9.9", lambda m: None, lambda: rechecks.append(clock[0]), timeout=120)
+    raise AssertionError("closed port must time out")
+except RuntimeError:
+    pass
+assert 3 <= len(rechecks) <= 4, rechecks
+app.time.time, app.time.sleep, app.socket.create_connection = real_time, real_sleep, real_conn
+
+# migrate_old_files: copies key and settings once, never overwrites newer files
+d = tempfile.mkdtemp()
+old, new = os.path.join(d, "old"), os.path.join(d, "new")
+os.makedirs(old)
+open(os.path.join(old, "aws-key.bin"), "w").write("K")
+open(os.path.join(old, "settings.json"), "w").write("S")
+assert app.migrate_old_files(old, new) == ["aws-key.bin", "settings.json"]
+open(os.path.join(new, "settings.json"), "w").write("NEWER")
+assert app.migrate_old_files(old, new) == [] and open(os.path.join(new, "settings.json")).read() == "NEWER"
+shutil.rmtree(d)
+assert "AppData" not in app.APP_DIR and "AppData" not in app.SB_CONFIG, "Store Python would redirect these"
 # ensure_config: creates a valid config with a 16-byte base64 key, never overwrites an existing one
 import base64
 d = tempfile.mkdtemp()
@@ -205,7 +257,7 @@ def fake_app(aws):
     a.aws = lambda: aws
     for name, fn in {"find_singbox": lambda: "sing-box.exe", "ensure_config": lambda: False,
                      "load_config": lambda: {"outbounds": [{"tag": "ss-out", "password": "pw"}]},
-                     "warp_connected": lambda: False, "stop_singbox": lambda: None, "my_ip": lambda: "1.2.3.4",
+                     "warp_connected": lambda: False, "stop_singbox": lambda: None, "my_ips": lambda **k: {"1.2.3.4"},
                      "singbox_running": lambda: False, "set_server": lambda ip: None,
                      "start_singbox": lambda exe: None, "egress_ip": lambda: "5.6.7.8"}.items():
         setattr(app, name, fn)
@@ -239,7 +291,7 @@ except RuntimeError:
 assert aws.launched == [] and aws.terminated == []
 
 # 3. Stopped servers are cleaned up, and a working Start shows the success popup
-app.wait_port = lambda ip, log: None
+app.wait_port = lambda *a, **k: None
 aws = FakeAws([{"InstanceId": "i-stopped", "State": {"Name": "stopped"}, "LaunchTime": now}])
 a = fake_app(aws)
 a.start()

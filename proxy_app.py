@@ -42,8 +42,10 @@ SS_VERSION = "1.25.0"
 SG_NAME = "ss-proxy-sg"
 AMI_PARAM = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 
-LOCAL = os.environ.get("LOCALAPPDATA", "")
-APP_DIR = os.path.join(LOCAL, "proxy-on-demand")
+# Not %LOCALAPPDATA%: the Microsoft Store build of Python silently redirects writes there into its own
+# package folder, where you can't find them and where sing-box (not a Store app) can't read its config.
+APP_DIR = os.path.join(os.path.expanduser("~"), ".proxy-on-demand")
+OLD_APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "proxy-on-demand")  # earlier versions
 APP_LOG = os.path.join(APP_DIR, "app.log")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 DEFAULT_SETTINGS = {"mfa": True, "region": "ap-south-1", "ssm_role": ""}  # MFA on unless the user opts out
@@ -51,10 +53,9 @@ KEY_FILE = os.path.join(APP_DIR, "aws-key.bin")  # DPAPI-encrypted, readable onl
 DPAPI_ENTROPY = b"proxy-on-demand/aws-key/v1"
 PLAINTEXT_CRED_FILE = os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or \
     os.path.join(os.path.expanduser("~"), ".aws", "credentials")
-SB_DIR = os.path.join(LOCAL, "sing-box")
+SB_DIR = SB_HOME = os.path.join(APP_DIR, "sing-box")  # sing-box.exe, its config and its log
 SB_CONFIG = os.path.join(SB_DIR, "config.json")
 SB_LOG = os.path.join(SB_DIR, "sing-box.log")
-SB_HOME = os.path.join(APP_DIR, "sing-box")
 SB_VERSION = "1.14.4"
 SB_ZIP_SHA256 = "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df"  # official windows-amd64 zip
 WARP_CLI = r"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
@@ -166,6 +167,18 @@ def install_singbox(log):
 
 
 # ---------- settings and AWS key ----------
+
+def migrate_old_files(old=OLD_APP_DIR, new=APP_DIR):
+    """Carry the saved key and settings over from the old location. Returns the names copied."""
+    copied = []
+    for name in ("aws-key.bin", "settings.json"):
+        src, dst = os.path.join(old, name), os.path.join(new, name)
+        if os.path.exists(src) and not os.path.exists(dst):
+            os.makedirs(new, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied.append(name)
+    return copied
+
 
 def load_settings(path=SETTINGS_FILE):
     try:
@@ -409,12 +422,26 @@ def egress_ip():
         return r.read().decode().strip()
 
 
-def my_ip():
-    """Your public IPv4 right now (call while sing-box is stopped)."""
-    with urllib.request.urlopen("https://checkip.amazonaws.com", timeout=10) as r:
-        ip = r.read().decode().strip()
-    socket.inet_aton(ip)  # raises if the reply is not an IPv4 address
-    return ip
+IP_SERVICES = ("https://checkip.amazonaws.com", "https://api.ipify.org", "https://ipv4.icanhazip.com")
+
+
+def my_ips(rounds=3):
+    """All public IPv4 addresses your network uses (call while sing-box is stopped). Campus and office
+    networks often spread connections over several public IPs, so ask several services several times."""
+    found = set()
+    for _ in range(rounds):
+        for url in IP_SERVICES:
+            try:
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    ip = r.read().decode().strip()
+                socket.inet_aton(ip)  # skip anything that is not an IPv4 address
+                if ip.count(".") == 3:
+                    found.add(ip)
+            except (OSError, ValueError):
+                pass
+    if not found:
+        raise RuntimeError("Could not find your public IP address. Check your internet connection.")
+    return found
 
 
 # ---------- server side: EC2 ----------
@@ -499,19 +526,22 @@ class Aws:
             TagSpecifications=[{"ResourceType": "security-group",
                                 "Tags": [{"Key": "app", "Value": APP_TAG}]}])["GroupId"]
 
-    def allow_only(self, sg, ip):
-        """Replace all inbound rules with TCP+UDP PORT from ip/32 only."""
+    def allow_only(self, sg, ips):
+        """Replace all inbound rules with TCP+UDP PORT from exactly these IPs (/32 each)."""
+        ips = sorted(ips)
         old = self.ec2.describe_security_groups(GroupIds=[sg])["SecurityGroups"][0]["IpPermissions"]
-        want = [{"IpProtocol": p, "FromPort": PORT, "ToPort": PORT,
-                 "IpRanges": [{"CidrIp": f"{ip}/32", "Description": "my IP, set by proxy app"}]}
-                for p in ("tcp", "udp")]
-        if [(r["IpProtocol"], [x["CidrIp"] for x in r.get("IpRanges", [])]) for r in old] == \
-           [(r["IpProtocol"], [f"{ip}/32"]) for r in want]:
+        current = {(r["IpProtocol"], tuple(sorted(x["CidrIp"] for x in r.get("IpRanges", [])))) for r in old
+                   if not r.get("Ipv6Ranges") and not r.get("UserIdGroupPairs") and not r.get("PrefixListIds")}
+        wanted = {(p, tuple(f"{ip}/32" for ip in ips)) for p in ("tcp", "udp")}
+        if current == wanted and len(old) == 2:
             return
         if old:
             self.ec2.revoke_security_group_ingress(GroupId=sg, IpPermissions=old)
-        self.ec2.authorize_security_group_ingress(GroupId=sg, IpPermissions=want)
-        self.log(f"Inbound {PORT} now allowed only from {ip}")
+        self.ec2.authorize_security_group_ingress(GroupId=sg, IpPermissions=[
+            {"IpProtocol": p, "FromPort": PORT, "ToPort": PORT,
+             "IpRanges": [{"CidrIp": f"{ip}/32", "Description": "my network, set by proxy app"} for ip in ips]}
+            for p in ("tcp", "udp")])
+        self.log(f"Inbound {PORT} now allowed only from your network: {', '.join(ips)}")
 
     def launch(self, password, sg, subnet):
         ami = self.ssm.get_parameter(Name=AMI_PARAM)["Parameter"]["Value"]
@@ -565,17 +595,25 @@ def uptime_text(launch_time, now=None):
     return f"up {fmt(h)}, ~${h * HOURLY_USD:.2f} so far, auto-terminates in {fmt(left)}"
 
 
-def wait_port(ip, log, timeout=420):
-    log(f"Waiting for Shadowsocks on {ip}:{PORT} (first boot installs it, about 1-2 min)")
-    end = time.time() + timeout
+def wait_port(ip, log, recheck=lambda: None, timeout=300):
+    """Wait until the server accepts connections. recheck() runs every 30 s, e.g. to allow
+    public IPs of your network that were not seen at first."""
+    log(f"Waiting for Shadowsocks on {ip}:{PORT} (first boot installs it, usually under 1 min)")
+    end, next_check = time.time() + timeout, time.time() + 30
     while time.time() < end:
         try:
             socket.create_connection((ip, PORT), 3).close()
             return
         except OSError:
+            if time.time() >= next_check:
+                recheck()
+                next_check = time.time() + 30
             time.sleep(5)
-    raise RuntimeError(f"{ip}:{PORT} did not open in {timeout // 60} min. Check the instance's "
-                       "system log (EC2 > Actions > Monitor > Get system log) for SS-SETUP-DONE.")
+    raise RuntimeError(
+        f"{ip}:{PORT} did not open in {timeout // 60} min. Usually your network reaches the internet "
+        "through a public IP the app could not detect, so the server's firewall blocked you; your network "
+        "may also block this traffic. To check the server itself: EC2 > instance > Actions > Monitor and "
+        "troubleshoot > Get system log, and look for SS-SETUP-DONE (set KEEP_FAILED_SERVER = True to keep it).")
 
 
 # ---------- UI ----------
@@ -585,7 +623,8 @@ class App:
         self.root, self.q, self.busy, self.warp_was_on = root, queue.Queue(), False, False
         self.server_up, self.first_check = False, True
         self.session, self.session_expiry = None, None  # temporary AWS credentials, memory only
-        os.makedirs(os.path.dirname(APP_LOG), exist_ok=True)
+        os.makedirs(APP_DIR, exist_ok=True)
+        moved = migrate_old_files()
         root.title("Proxy on demand")
         root.geometry("700x420")
         self.status = tk.StringVar(value="Checking...")
@@ -597,11 +636,14 @@ class App:
                          ("AWS settings", self.settings_dialog))]
         for b in self.buttons:
             b.pack(side="left", padx=(0, 8))
+        tk.Button(bar, text="Logs", width=8, command=lambda: os.startfile(APP_DIR)).pack(side="right")
         self.out = scrolledtext.ScrolledText(root, height=16, font=("Consolas", 9), state="disabled")
         self.out.pack(fill="both", expand=True, padx=12, pady=10)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(200, self.pump)
         root.after(300_000, self.tick)
+        if moved:
+            self.log(f"Moved your saved {' and '.join(moved)} to {APP_DIR}")
         self.refresh()
 
     def log(self, msg):
@@ -868,10 +910,16 @@ class App:
                 warp_disconnect()
                 self.warp_was_on = True
             stop_singbox()  # so the IP check below sees your real IP, not the old server's
-            me = my_ip()
+            allowed = my_ips()
             vpc, subnet = aws.default_vpc_subnet()
             sg = aws.security_group(vpc)
-            aws.allow_only(sg, me)
+            aws.allow_only(sg, allowed)
+
+            def recheck():  # networks with several public IPs: allow any we had not seen yet
+                new = my_ips(rounds=2) - allowed
+                if new:
+                    allowed.update(new)
+                    aws.allow_only(sg, allowed)
             insts = aws.instances()
             stopped = [i["InstanceId"] for i in insts if i["State"]["Name"] in ("stopping", "stopped")]
             if stopped:  # a stopped server still bills for its disk; never leave one behind
@@ -886,7 +934,7 @@ class App:
                     launched = aws.launch(password, sg, subnet)
                     inst = aws.wait_running(launched)
                 ip = inst["PublicIpAddress"]
-                wait_port(ip, self.log)
+                wait_port(ip, self.log, recheck)
                 stop_singbox()
                 set_server(ip)
                 self.log(f"sing-box config now points at {ip}")
