@@ -120,7 +120,7 @@ sf = os.path.join(d, "s", "settings.json")
 assert app.load_settings(sf) == app.DEFAULT_SETTINGS  # missing file -> defaults
 assert app.DEFAULT_SETTINGS["mfa"] is True, "MFA must be on unless the user opts out"
 app.save_settings({"region": "eu-west-1", "ssm_role": "R"}, sf)  # file from before the MFA option existed
-assert app.load_settings(sf) == {"mfa": True, "region": "eu-west-1", "ssm_role": "R"}
+assert app.load_settings(sf) == {"mfa": True, "region": "eu-west-1", "ssm_role": "R", "max_hours": 12}
 app.save_settings({"mfa": False, "region": "eu-west-1", "ssm_role": ""}, sf)
 assert app.load_settings(sf)["mfa"] is False
 open(sf, "w").write("{broken")
@@ -221,9 +221,45 @@ app.warp = real_warp
 # uptime_text: cost and countdown
 from datetime import datetime, timedelta, timezone
 now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-t = app.uptime_text(now - timedelta(hours=2, minutes=5), now)
-assert t.startswith("up 2h05m") and "auto-terminates in 9h55m" in t, t
-assert "in 0h00m" in app.uptime_text(now - timedelta(hours=30), now)
+t = app.uptime_text(now - timedelta(hours=2, minutes=5), now=now)
+assert t.startswith("Running 2h05m") and "auto-deletes in 9h55m" in t and "at most ~$0.22" in t, t
+assert "in 0h00m" in app.uptime_text(now - timedelta(hours=30), now=now)
+t = app.uptime_text(now - timedelta(minutes=10), 3, now=now)
+assert "auto-deletes in 2h50m" in t and "at most ~$0.05" in t and "less than $0.01" in t, t
+
+# cost_text: shows the hourly rate and the maximum for the chosen hours
+assert "$0.018 per hour" in app.cost_text(12) and "about $0.22" in app.cost_text(12)
+assert "about $0.02 if it runs the full 1 h" in app.cost_text(1)
+
+# auto-delete hours: clamped to 1..24, carried into the server script and read back from the tag
+assert [app.clamp_hours(x) for x in (0, 1, "5", 99, "junk", None)] == [1, 1, 5, 24, 12, 12]
+assert "shutdown -h +180\n" in app.user_data("x", 3) and "shutdown -h +1440\n" in app.user_data("x", 500)
+assert app.server_hours({"Tags": [{"Key": "auto-delete-hours", "Value": "6"}]}) == 6
+assert app.server_hours({}) == app.MAX_HOURS  # servers launched before the setting existed
+d = tempfile.mkdtemp()
+sf = os.path.join(d, "settings.json")
+app.save_settings({"region": "eu-west-1"}, sf)
+app.save_settings({"max_hours": 6}, sf)  # saving one setting keeps the others
+assert app.load_settings(sf)["region"] == "eu-west-1" and app.load_settings(sf)["max_hours"] == 6
+shutil.rmtree(d)
+
+# progress_estimate: moves with time, never finishes early, flags a slow step
+steps = [("a", "A", 10), ("b", "B", 30)]
+f0, left0, late0 = app.progress_estimate(steps, 0, 0)
+f1, left1, late1 = app.progress_estimate(steps, 0, 5)
+f2, left2, late2 = app.progress_estimate(steps, 0, 100)  # step a is very late
+f3, left3, _ = app.progress_estimate(steps, 1, 0)
+assert f0 == 0 and left0 == 40 and not late0
+assert 0 < f1 < f2 < f3 < 1 and left1 == 35
+assert late2 and f2 < 10 / 40, "a slow step must not push the bar past its share"
+assert app.progress_estimate(steps, 1, 1000)[0] < 1
+assert app.duration_text(45) == "45 s" and app.duration_text(95) == "1 min 35 s"
+step_keys = lambda steps: [s[0] for s in steps]
+for steps in (app.START_STEPS, app.STOP_STEPS, app.REFRESH_STEPS):
+    assert len(set(step_keys(steps))) == len(steps) and all(s[2] > 0 for s in steps)
+src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_app.py"), encoding="utf-8").read()
+for key in step_keys(app.START_STEPS) + step_keys(app.STOP_STEPS):
+    assert f'self.step("{key}")' in src, f"step {key} is never reported, so the bar would stall"
 
 
 # Billing fail-safes, with AWS and the local network faked out
@@ -237,8 +273,9 @@ class FakeAws:
     def security_group(self, vpc): return "sg-1"
     def allow_only(self, sg, ip): pass
     def instances(self): return [i for i in self.insts if i["InstanceId"] not in self.terminated]
-    def launch(self, pw, sg, subnet):
+    def launch(self, pw, sg, subnet, hours=12):
         self.launched.append("i-new")
+        self.launch_hours = hours
         self.insts.append({"InstanceId": "i-new", "State": {"Name": "pending"}, "LaunchTime": now})
         return "i-new"
     def wait_running(self, iid): return {"InstanceId": iid, "PublicIpAddress": "5.6.7.8", "LaunchTime": now}
@@ -252,8 +289,11 @@ class FakeAws:
 def fake_app(aws):
     a = app.App.__new__(app.App)
     a.q, a.busy, a.warp_was_on, a.server_up, a.first_check = queue.Queue(), False, False, False, False
+    a.connected_ip, a.health_failures = None, 0
     a.log = lambda m: None
-    a.run = lambda job: job()  # synchronous, exceptions propagate
+    a.save_hours = lambda: None
+    a.run = lambda job, steps, headline: job()  # synchronous, exceptions propagate
+    app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5}
     a.aws = lambda: aws
     for name, fn in {"find_singbox": lambda: "sing-box.exe", "ensure_config": lambda: False,
                      "load_config": lambda: {"outbounds": [{"tag": "ss-out", "password": "pw"}]},
@@ -294,13 +334,24 @@ assert aws.launched == [] and aws.terminated == []
 app.wait_port = lambda *a, **k: None
 aws = FakeAws([{"InstanceId": "i-stopped", "State": {"Name": "stopped"}, "LaunchTime": now}])
 a = fake_app(aws)
+app.singbox_running = lambda: True  # after a successful Start the tunnel is up
 a.start()
+app.singbox_running = lambda: False
 assert aws.terminated == ["i-stopped"] and aws.launched == ["i-new"]
-assert any(k == "popup" and "Successfully connected" in m for k, m in kinds(a))
+assert aws.launch_hours == 5, "the auto-delete hours chosen on the main window reach the server"
+assert a.connected_ip == "5.6.7.8"
+msgs = kinds(a)
+assert any(k == "popup" and "Successfully connected" in m and "Reconnect" in m for k, m in msgs)
+assert ("start_label", "Reconnect") in msgs, "while a server runs, Start becomes Reconnect"
+assert any(k == "status" and m[1] == "ok" and "Connected via" in m[0] for k, m in msgs)
+reported = [m for k, m in msgs if k == "step"]
+assert reported == [s[0] for s in app.START_STEPS], reported
 
 # 4. Stop verifies nothing is left; a leftover raises a warning
 a.stop()
-assert aws.instances() == [] and not any(k == "warn" for k, m in kinds(a))
+msgs = kinds(a)
+assert aws.instances() == [] and not any(k == "warn" for k, m in msgs) and a.connected_ip is None
+assert ("start_label", "Start") in msgs
 aws.leftovers = lambda: ["vol-123"]
 a.stop()
 assert any(k == "warn" and "vol-123" in m for k, m in kinds(a))
@@ -311,6 +362,26 @@ a = fake_app(aws)
 a.first_check = True
 a.report(aws)
 assert a.server_up and any(k == "warn" and "already running" in m for k, m in kinds(a))
+
+# 5b. Reopened while still connected: the app picks the connection up (no restart, no new server)
+aws = FakeAws([{"InstanceId": "i-old", "State": {"Name": "running"}, "LaunchTime": now,
+                "PublicIpAddress": "5.6.7.8"}])
+a = fake_app(aws)
+app.singbox_running, app.egress_ip = (lambda: True), (lambda: "5.6.7.8")
+a.report(aws)
+msgs = kinds(a)
+assert a.connected_ip == "5.6.7.8" and any(k == "status" and m[1] == "ok" for k, m in msgs)
+assert aws.launched == [] and aws.terminated == []
+
+# 5c. Reopened after the server auto-deleted: the dead tunnel is stopped so the internet works again
+stopped = []
+aws = FakeAws([])
+a = fake_app(aws)
+app.singbox_running, app.stop_singbox = (lambda: True), (lambda: stopped.append(1))
+a.report(aws)
+assert stopped and a.connected_ip is None
+assert any(k == "status" and "Not connected" in m[0] for k, m in kinds(a))
+app.singbox_running, app.stop_singbox = (lambda: False), (lambda: None)
 
 # 6. MFA sign-in: asks once per hour, cancel means no AWS access, nothing without a saved key
 calls = []

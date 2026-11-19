@@ -29,7 +29,7 @@ import tkinter as tk
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
-from tkinter import messagebox, scrolledtext, simpledialog
+from tkinter import messagebox, scrolledtext, simpledialog, ttk
 
 ROLE_NAME = "proxy-on-demand-role"  # IAM role holding the app's EC2 permissions; assumable only with MFA
 SESSION_SECONDS = 3600              # temporary credentials last 1 hour, in memory only
@@ -48,7 +48,8 @@ APP_DIR = os.path.join(os.path.expanduser("~"), ".proxy-on-demand")
 OLD_APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "proxy-on-demand")  # earlier versions
 APP_LOG = os.path.join(APP_DIR, "app.log")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
-DEFAULT_SETTINGS = {"mfa": True, "region": "ap-south-1", "ssm_role": ""}  # MFA on unless the user opts out
+DEFAULT_SETTINGS = {"mfa": True, "region": "ap-south-1", "ssm_role": "",  # MFA on unless the user opts out
+                    "max_hours": 12}
 KEY_FILE = os.path.join(APP_DIR, "aws-key.bin")  # DPAPI-encrypted, readable only by this Windows user
 DPAPI_ENTROPY = b"proxy-on-demand/aws-key/v1"
 PLAINTEXT_CRED_FILE = os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or \
@@ -59,7 +60,8 @@ SB_LOG = os.path.join(SB_DIR, "sing-box.log")
 SB_VERSION = "1.14.4"
 SB_ZIP_SHA256 = "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df"  # official windows-amd64 zip
 WARP_CLI = r"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
-MAX_HOURS = 12                    # safety net: a server terminates itself after this, even if the laptop is off
+MAX_HOURS = 12                    # default auto-delete time; users pick 1..MAX_HOURS_LIMIT on the main window
+MAX_HOURS_LIMIT = 24
 HOURLY_USD = 0.018                # t3.micro + public IPv4 + 8 GB disk (ap-south-1), excluding data transfer
 KEEP_FAILED_SERVER = False        # True keeps a server whose Start failed (for debugging); it then bills until Stop
 NO_WINDOW = 0x08000000
@@ -186,12 +188,22 @@ def load_settings(path=SETTINGS_FILE):
             saved = json.load(f)
     except (OSError, ValueError):
         saved = {}
-    return {**DEFAULT_SETTINGS, **{k: v for k, v in saved.items() if k in DEFAULT_SETTINGS}}
+    s = {**DEFAULT_SETTINGS, **{k: v for k, v in saved.items() if k in DEFAULT_SETTINGS}}
+    s["max_hours"] = clamp_hours(s["max_hours"])
+    return s
 
 
-def save_settings(settings, path=SETTINGS_FILE):
+def clamp_hours(value):
+    try:
+        return min(MAX_HOURS_LIMIT, max(1, int(value)))
+    except (TypeError, ValueError):
+        return DEFAULT_SETTINGS["max_hours"]
+
+
+def save_settings(changes, path=SETTINGS_FILE):
+    """Merge changes into the saved settings (other keys are kept)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    write_json(path, settings)
+    write_json(path, {**load_settings(path), **changes})
 
 
 def valid_region(region):
@@ -446,8 +458,9 @@ def my_ips(rounds=3):
 
 # ---------- server side: EC2 ----------
 
-def user_data(password):
+def user_data(password, max_hours=MAX_HOURS):
     """First-boot script: install shadowsocks-rust (checksum-verified) and run it as a service."""
+    max_hours = clamp_hours(max_hours)
     ss_conf = json.dumps({"server": "0.0.0.0", "server_port": PORT, "password": password,
                           "method": METHOD, "mode": "tcp_and_udp"})
     # musl = statically linked: the -gnu build needs a newer glibc than Amazon Linux 2023 ships and crash-loops
@@ -458,8 +471,8 @@ def user_data(password):
 set -euxo pipefail
 exec > >(tee /var/log/ss-setup.log > /dev/console) 2>&1
 # safety net first, so it holds even if setup fails: launched with shutdown-behavior=terminate,
-# this ends all billing after {MAX_HOURS} h even if Stop is never pressed
-shutdown -h +{MAX_HOURS * 60}
+# this ends all billing after {max_hours} h even if Stop is never pressed
+shutdown -h +{max_hours * 60}
 cd /tmp
 command -v xz || dnf install -y xz
 curl -fsSL --retry 5 -O {url} -O {url}.sha256
@@ -548,12 +561,14 @@ class Aws:
             for p in ("tcp", "udp")])
         self.log(f"Inbound {PORT} now allowed only from your network: {', '.join(ips)}")
 
-    def launch(self, password, sg, subnet):
+    def launch(self, password, sg, subnet, max_hours=MAX_HOURS):
         ami = self.ssm.get_parameter(Name=AMI_PARAM)["Parameter"]["Value"]
-        tags = [{"Key": "Name", "Value": "ss-proxy"}, {"Key": "app", "Value": APP_TAG}]
+        max_hours = clamp_hours(max_hours)
+        tags = [{"Key": "Name", "Value": "ss-proxy"}, {"Key": "app", "Value": APP_TAG},
+                {"Key": "auto-delete-hours", "Value": str(max_hours)}]  # read back for the countdown
         args = dict(
             ImageId=ami, InstanceType=INSTANCE_TYPE, MinCount=1, MaxCount=1,
-            UserData=user_data(password),
+            UserData=user_data(password, max_hours),
             InstanceInitiatedShutdownBehavior="terminate",   # a shutdown from inside also stops billing
             MetadataOptions={"HttpTokens": "required"},
             NetworkInterfaces=[{"DeviceIndex": 0, "SubnetId": subnet, "Groups": [sg],
@@ -592,12 +607,30 @@ class Aws:
         return self.leftovers()
 
 
-def uptime_text(launch_time, now=None):
-    """'up 1h05m, ~$0.02 so far, auto-terminates in 10h55m' for a server launched at launch_time (UTC)."""
+def server_hours(instance):
+    """The auto-delete time a server was launched with (from its tag; older servers used the default)."""
+    tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
+    return clamp_hours(tags.get("auto-delete-hours", MAX_HOURS))
+
+
+def money(usd):
+    return f"${usd:.2f}" if usd >= 0.01 else "less than $0.01"
+
+
+def cost_text(max_hours):
+    """What a session costs, before you start it."""
+    return (f"Applies to the next server you start. A server costs about ${HOURLY_USD:.3f} per hour, so at "
+            f"most about {money(max_hours * HOURLY_USD)} if it runs the full {max_hours} h. "
+            "Downloads beyond 100 GB a month cost extra.")
+
+
+def uptime_text(launch_time, max_hours=MAX_HOURS, now=None):
+    """'Running 1h05m · cost so far ~$0.02 (at most ~$0.22) · auto-deletes in 10h55m'."""
     h = ((now or datetime.now(timezone.utc)) - launch_time).total_seconds() / 3600
-    left = max(0.0, MAX_HOURS - h)
+    left = max(0.0, max_hours - h)
     fmt = lambda x: f"{int(x)}h{int(x * 60) % 60:02d}m"
-    return f"up {fmt(h)}, ~${h * HOURLY_USD:.2f} so far, auto-terminates in {fmt(left)}"
+    return (f"Running {fmt(h)} · cost so far ~{money(h * HOURLY_USD)} "
+            f"(at most ~{money(max_hours * HOURLY_USD)}) · auto-deletes in {fmt(left)}")
 
 
 def wait_port(ip, log, recheck=lambda: None, timeout=300):
@@ -623,33 +656,138 @@ def wait_port(ip, log, recheck=lambda: None, timeout=300):
 
 # ---------- UI ----------
 
+# (key, what the user sees, typical seconds). The estimates come from real runs; the bar never lies by
+# finishing early: a step that runs long holds at 95% of its share and the label says so.
+START_STEPS = [("signin", "Signing in to AWS", 3), ("network", "Checking your network", 7),
+               ("firewall", "Updating the server firewall", 4), ("launch", "Launching the server", 20),
+               ("boot", "Server is installing Shadowsocks", 35), ("tunnel", "Starting the secure tunnel", 8),
+               ("verify", "Checking the connection", 4)]
+STOP_STEPS = [("disconnect", "Disconnecting", 3), ("signin", "Signing in to AWS", 3),
+              ("delete", "Deleting the server and checking nothing is left", 40)]
+REFRESH_STEPS = [("signin", "Signing in to AWS", 3), ("check", "Checking for running servers", 3)]
+COLORS = {"idle": "#9aa0a6", "busy": "#f29900", "ok": "#188038", "warn": "#e8710a", "error": "#d93025"}
+
+
+def progress_estimate(steps, index, elapsed):
+    """(fraction done 0..1, seconds left, running late?) while step `index` has run for `elapsed` s."""
+    expected = steps[index][2]
+    current = min(elapsed, expected * 0.95)
+    done = sum(s[2] for s in steps[:index]) + current
+    total = sum(s[2] for s in steps)
+    left = total - done
+    return done / total, max(1, round(left)), elapsed > expected
+
+
+def duration_text(seconds):
+    return f"{seconds} s" if seconds < 60 else f"{seconds // 60} min {seconds % 60:02d} s"
+
+
 class App:
     def __init__(self, root):
         self.root, self.q, self.busy, self.warp_was_on = root, queue.Queue(), False, False
         self.server_up, self.first_check = False, True
         self.session, self.session_expiry = None, None  # temporary AWS credentials, memory only
+        self.connected_ip, self.health_failures = None, 0
+        self.steps, self.step_index, self.step_started = None, 0, 0.0
         os.makedirs(APP_DIR, exist_ok=True)
         moved = migrate_old_files()
+
         root.title("Proxy on demand")
-        root.geometry("700x420")
-        self.status = tk.StringVar(value="Checking...")
-        tk.Label(root, textvariable=self.status, font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x", padx=12, pady=(10, 4))
-        bar = tk.Frame(root)
-        bar.pack(fill="x", padx=12)
-        self.buttons = [tk.Button(bar, text=t, width=12, command=c) for t, c in
-                        (("Start", self.start), ("Stop", self.stop), ("Refresh", self.refresh),
-                         ("AWS settings", self.settings_dialog))]
+        root.geometry("900x720")
+        root.minsize(780, 620)
+        root.option_add("*Font", ("Segoe UI", 10))
+        style = ttk.Style()
+        style.configure("TLabel", font=("Segoe UI", 10))
+        style.configure("TButton", font=("Segoe UI", 10), padding=(12, 6))
+        style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=(26, 10))
+        style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+        pad = 24  # outer margin
+
+        # status: colored dot, headline, detail line
+        top = ttk.Frame(root, padding=(pad, 22, pad, 10))
+        top.pack(fill="x")
+        self.dot = tk.Label(top, text="●", font=("Segoe UI", 24), fg=COLORS["idle"])
+        self.dot.pack(side="left", anchor="n")
+        text = ttk.Frame(top)
+        text.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        self.status, self.detail = tk.StringVar(value="Checking..."), tk.StringVar()
+        ttk.Label(text, textvariable=self.status, font=("Segoe UI", 15, "bold")).pack(anchor="w")
+        ttk.Label(text, textvariable=self.detail, foreground="#5f6368", justify="left",
+                  wraplength=760).pack(anchor="w", pady=(4, 0))
+
+        # progress (shown only while something runs)
+        self.progress = ttk.Frame(root, padding=(pad, 4, pad, 8))
+        self.bar = ttk.Progressbar(self.progress, mode="determinate", maximum=1000)
+        self.bar.pack(fill="x", ipady=3)
+        self.step_text = tk.StringVar()
+        ttk.Label(self.progress, textvariable=self.step_text, foreground="#5f6368").pack(anchor="w", pady=(6, 0))
+
+        # buttons
+        self.controls = ttk.Frame(root, padding=(pad, 10, pad, 14))
+        self.controls.pack(fill="x")
+        self.start_btn = ttk.Button(self.controls, text="Start", style="Big.TButton", command=self.start)
+        self.stop_btn = ttk.Button(self.controls, text="Stop", style="Big.TButton", command=self.stop)
+        self.buttons = [self.start_btn, self.stop_btn,
+                        ttk.Button(self.controls, text="Refresh", command=self.refresh),
+                        ttk.Button(self.controls, text="AWS settings", command=self.settings_dialog)]
         for b in self.buttons:
-            b.pack(side="left", padx=(0, 8))
-        tk.Button(bar, text="Logs", width=8, command=lambda: os.startfile(APP_DIR)).pack(side="right")
-        self.out = scrolledtext.ScrolledText(root, height=16, font=("Consolas", 9), state="disabled")
-        self.out.pack(fill="both", expand=True, padx=12, pady=10)
+            b.pack(side="left", padx=(0, 12))
+        ttk.Button(self.controls, text="Logs", command=lambda: os.startfile(APP_DIR)).pack(side="right")
+
+        # server lifetime and cost, chosen before Start
+        life = ttk.LabelFrame(root, text="Server lifetime and cost", padding=(18, 12, 18, 14))
+        life.pack(fill="x", padx=pad, pady=(0, 12))
+        row = ttk.Frame(life)
+        row.pack(fill="x")
+        ttk.Label(row, text="Delete the server automatically after").pack(side="left")
+        self.hours = tk.StringVar(value=str(load_settings()["max_hours"]))
+        spin = ttk.Spinbox(row, from_=1, to=MAX_HOURS_LIMIT, width=5, textvariable=self.hours,
+                           command=self.save_hours, justify="center", font=("Segoe UI", 11))
+        spin.pack(side="left", padx=10, ipady=2)
+        spin.bind("<FocusOut>", lambda e: self.save_hours())
+        spin.bind("<Return>", lambda e: self.save_hours())
+        ttk.Label(row, text="hours, even if you never press Stop.").pack(side="left")
+        self.cost = tk.StringVar(value=cost_text(clamp_hours(self.hours.get())))
+        ttk.Label(life, textvariable=self.cost, foreground="#5f6368", wraplength=780,
+                  justify="left").pack(anchor="w", pady=(10, 0))
+        self.hours.trace_add("write", lambda *a: self.cost.set(cost_text(clamp_hours(self.hours.get()))))
+
+        # activity log
+        act = ttk.LabelFrame(root, text="Activity", padding=(10, 8, 10, 10))
+        act.pack(fill="both", expand=True, padx=pad, pady=(0, pad))
+        self.out = scrolledtext.ScrolledText(act, height=10, font=("Consolas", 10), state="disabled",
+                                             relief="flat", borderwidth=0, padx=8, pady=6)
+        self.out.pack(fill="both", expand=True)
+
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(200, self.pump)
         root.after(300_000, self.tick)
+        root.after(60_000, self.health)
         if moved:
             self.log(f"Moved your saved {' and '.join(moved)} to {APP_DIR}")
         self.refresh()
+
+    def save_hours(self):
+        hours = clamp_hours(self.hours.get())
+        self.hours.set(str(hours))
+        if hours != load_settings()["max_hours"]:
+            save_settings({"max_hours": hours})
+            self.log(f"New servers will delete themselves after {hours} h")
+
+    def step(self, key):
+        """Called from the worker thread: the job moved on to step `key`."""
+        self.q.put(("step", key))
+
+    def animate(self):
+        if not self.busy or not self.steps:
+            return
+        frac, left, late = progress_estimate(self.steps, self.step_index, time.time() - self.step_started)
+        self.bar["value"] = int(frac * 1000)
+        label = self.steps[self.step_index][1]
+        n = f"step {self.step_index + 1} of {len(self.steps)}"
+        self.step_text.set(f"{label}...  ({n}, taking a little longer than usual)" if late else
+                           f"{label}...  ({n}, about {duration_text(left)} left)")
+        self.root.after(250, self.animate)
 
     def log(self, msg):
         self.q.put(("log", time.strftime("%H:%M:%S ") + msg))
@@ -659,14 +797,23 @@ class App:
         except OSError:
             pass  # the on-screen log still works
 
-    def set_status(self, msg):
-        self.q.put(("status", msg))
+    def set_status(self, msg, tone="idle", detail=""):
+        self.q.put(("status", (msg, tone, detail)))
 
     def pump(self):
         while not self.q.empty():
             kind, msg = self.q.get()
             if kind == "status":
-                self.status.set(msg)
+                headline, tone, detail = msg
+                self.status.set(headline)
+                self.detail.set(detail)
+                self.dot.config(fg=COLORS[tone])
+            elif kind == "step":
+                keys = [s[0] for s in self.steps or []]
+                if msg in keys:
+                    self.step_index, self.step_started = keys.index(msg), time.time()
+            elif kind == "start_label":
+                self.start_btn.config(text=msg)
             elif kind == "popup":
                 messagebox.showinfo("Proxy on demand", msg)
             elif kind == "warn":
@@ -679,7 +826,8 @@ class App:
                     "Sign in to AWS", "Enter the 6-digit code from your authenticator app:", parent=self.root)
                 done.set()
             elif kind == "done":
-                self.busy = False
+                self.busy, self.steps = False, None
+                self.progress.pack_forget()
                 for b in self.buttons:
                     b.config(state="normal")
             else:
@@ -689,26 +837,33 @@ class App:
                 self.out.config(state="disabled")
         self.root.after(200, self.pump)
 
-    def run(self, job):
+    def run(self, job, steps, headline):
         if self.busy:
             return
         self.busy = True
         for b in self.buttons:
             b.config(state="disabled")
+        self.steps, self.step_index, self.step_started = steps, 0, time.time()
+        self.bar["value"] = 0
+        self.progress.pack(fill="x", before=self.controls)
+        self.status.set(headline)
+        self.detail.set("")
+        self.dot.config(fg=COLORS["busy"])
+        self.animate()
 
         def wrapped():
             try:
                 job()
             except NoKeyError as e:
                 self.log(str(e))
-                self.set_status("Set up your AWS key to begin")
+                self.set_status("Set up your AWS key to begin", "warn", "AWS settings has opened.")
                 self.q.put(("setup", ""))
             except SignInCancelled as e:
                 self.log(str(e))
-                self.set_status("Signed out - press Refresh to sign in")
+                self.set_status("Signed out", "warn", "Press Refresh to sign in with your MFA code.")
             except Exception as e:  # show every failure instead of dying silently
                 self.log(f"ERROR: {e}")
-                self.set_status("Error - see log")
+                self.set_status("Something went wrong", "error", "See the message and the activity log below.")
                 self.q.put(("warn", f"{e}\n\nFull log: {APP_LOG}"))
             finally:
                 self.q.put(("done", ""))
@@ -716,21 +871,64 @@ class App:
 
     def report(self, aws):
         insts = aws.instances()
-        sb = "running" if singbox_running() else "stopped"
+        tunnel = singbox_running()
         self.server_up = bool(insts)
         if insts:
             i = insts[0]
-            up = uptime_text(i["LaunchTime"])
-            self.set_status(f"Server {i['State']['Name']} at {i.get('PublicIpAddress', 'no IP')}  |  sing-box {sb}\n{up}")
+            up = uptime_text(i["LaunchTime"], server_hours(i))
+            ip = i.get("PublicIpAddress", "no IP yet")
+            if tunnel and not self.connected_ip:  # app was closed while connected: pick the connection up
+                try:
+                    if egress_ip() == ip:
+                        self.connected_ip, self.health_failures = ip, 0
+                        self.log(f"Picked up your existing connection through {ip}")
+                except OSError:
+                    pass
+            if tunnel and self.connected_ip:
+                self.set_status(f"Connected via {ip}", "ok",
+                                f"{up}.\nChanged network (e.g. Wi-Fi to mobile data)? Press Reconnect.")
+            else:
+                self.set_status("Server running, but this laptop is not connected", "warn",
+                                f"{up}.\nPress Reconnect to use it, or Stop to delete it.")
             if self.first_check:  # e.g. the app crashed or was closed with "leave it running"
                 self.q.put(("warn", f"A proxy server is already running and billing ({up}).\n\n"
-                                    "Press Stop if you are not using it."))
+                                    "Press Reconnect to use it, or Stop if you are not using it."))
+        elif tunnel:  # e.g. the server auto-deleted while the app was closed: this tunnel only blocks traffic
+            stop_singbox()
+            self.connected_ip = None
+            self.log("The tunnel was still running but its server is gone (it probably auto-deleted), "
+                     "so the tunnel was stopped to restore your normal internet.")
+            self.set_status("Not connected", "idle", "Your server had been deleted, so the leftover tunnel "
+                            "was stopped. Nothing is billing.")
         else:
-            self.set_status(f"No server (not billing)  |  sing-box {sb}")
+            self.connected_ip = None
+            self.set_status("Not connected", "idle", "Nothing is running on AWS, so nothing is billing.")
+        self.q.put(("start_label", "Reconnect" if insts else "Start"))
         self.first_check = False
 
     def refresh(self):
-        self.run(lambda: self.report(self.aws()))
+        def job():
+            self.step("signin")
+            aws = self.aws()
+            self.step("check")
+            self.report(aws)
+        self.run(job, REFRESH_STEPS, "Checking...")
+
+    def health(self):
+        """While connected, check every minute that traffic still flows through the server."""
+        def check():
+            try:
+                ok = egress_ip() == self.connected_ip
+            except OSError:
+                ok = False
+            self.health_failures = 0 if ok else self.health_failures + 1
+            if self.health_failures == 2:  # two misses in a row: tell the user once
+                self.log("Connection check failed twice: the tunnel is not working. Press Reconnect.")
+                self.set_status("Connection lost", "error", "Your network probably changed. Press Reconnect "
+                                "(it reuses the server and just updates the allowed IPs), or Stop.")
+        if self.connected_ip and not self.busy:
+            threading.Thread(target=check, daemon=True).start()
+        self.root.after(60_000, self.health)
 
     def session_valid(self):
         if self.session is None:
@@ -903,7 +1101,11 @@ class App:
         update_mode()
 
     def start(self):
+        self.save_hours()
+        hours = load_settings()["max_hours"]
+
         def job():
+            self.step("signin")
             aws = self.aws()
             if ensure_config():
                 self.log(f"Created a new sing-box config with a random password at {SB_CONFIG}")
@@ -914,8 +1116,11 @@ class App:
                 self.log("Disconnecting Cloudflare WARP (two VPNs at once break the tunnel)")
                 warp_disconnect()
                 self.warp_was_on = True
+            self.step("network")
             stop_singbox()  # so the IP check below sees your real IP, not the old server's
+            self.connected_ip = None
             allowed = my_ips()
+            self.step("firewall")
             vpc, subnet = aws.default_vpc_subnet()
             sg = aws.security_group(vpc)
             aws.allow_only(sg, allowed)
@@ -925,6 +1130,7 @@ class App:
                 if new:
                     allowed.update(new)
                     aws.allow_only(sg, allowed)
+            self.step("launch")
             insts = aws.instances()
             stopped = [i["InstanceId"] for i in insts if i["State"]["Name"] in ("stopping", "stopped")]
             if stopped:  # a stopped server still bills for its disk; never leave one behind
@@ -936,14 +1142,17 @@ class App:
                     self.log(f"Reusing running server {live[0]['InstanceId']}")
                     inst = aws.wait_running(live[0]["InstanceId"])
                 else:
-                    launched = aws.launch(password, sg, subnet)
+                    launched = aws.launch(password, sg, subnet, hours)
                     inst = aws.wait_running(launched)
                 ip = inst["PublicIpAddress"]
+                self.step("boot")
                 wait_port(ip, self.log, recheck)
+                self.step("tunnel")
                 stop_singbox()
                 set_server(ip)
                 self.log(f"sing-box config now points at {ip}")
                 start_singbox(find_singbox() or install_singbox(self.log))
+                self.step("verify")
                 got = None
                 for _ in range(6):
                     try:
@@ -967,18 +1176,26 @@ class App:
                     warp("connect")
                     self.warp_was_on = False
                 raise
+            self.connected_ip, self.health_failures = got, 0
             self.log(f"Successfully connected. Your public IP is now {got}")
             self.report(aws)
-            self.q.put(("popup", f"Successfully connected.\n\nYour traffic now leaves via {got} (Mumbai).\n"
-                                 f"Press Stop when you are done so nothing keeps billing.\n"
-                                 f"The server shuts itself down after {MAX_HOURS} h regardless."))
-        self.run(job)
+            server_h = server_hours(inst)
+            self.q.put(("popup", f"Successfully connected.\n\nYour traffic now leaves via {got} ({aws.region}).\n\n"
+                                 f"Press Stop when you are done. Otherwise the server deletes itself after "
+                                 f"{server_h} h (at most about {money(server_h * HOURLY_USD)}).\n\n"
+                                 "Changed network (e.g. Wi-Fi to mobile data) and it stops working? "
+                                 "Press Reconnect."))
+        self.run(job, START_STEPS, "Reconnecting..." if self.server_up else "Starting...")
 
     def stop(self):
         def job():
+            self.step("disconnect")
             self.log("Stopping sing-box")
             stop_singbox()
+            self.connected_ip = None
+            self.step("signin")
             aws = self.aws()
+            self.step("delete")
             left = aws.terminate_all()
             if self.warp_was_on:
                 self.log("Reconnecting Cloudflare WARP")
@@ -991,7 +1208,7 @@ class App:
                                     f"Press Stop again, or delete them in the EC2 console ({aws.region})."))
             else:
                 self.log("Verified: no proxy servers or disks left. Nothing is billing.")
-        self.run(job)
+        self.run(job, STOP_STEPS, "Stopping...")
 
     def tick(self):
         """While a server exists, refresh the status (uptime and cost) every 5 minutes."""
@@ -999,8 +1216,9 @@ class App:
             if self.session_valid():  # never pop up an MFA prompt from a background timer
                 self.refresh()
             else:
-                self.set_status("Signed out (the 1-hour sign-in ended). Your server may still be running and "
-                                "billing:\npress Refresh to sign in and check, or Stop to end it.")
+                self.set_status("Signed out (the 1-hour sign-in ended)", "warn",
+                                "Your server may still be running and billing. Press Refresh to sign in "
+                                "and check, or Stop to end it.")
         self.root.after(300_000, self.tick)
 
     def on_close(self):
@@ -1012,8 +1230,11 @@ class App:
         if not self.server_up and not singbox_running():
             self.root.destroy()
             return
-        ans = messagebox.askyesnocancel("Quit", "Stop the proxy and terminate the server before quitting?\n\n"
-                                                f"No = leave it running (it keeps billing, up to {MAX_HOURS} h).")
+        ans = messagebox.askyesnocancel("Quit", "Stop the proxy and delete the server before quitting?\n\n"
+                                                "Yes = stop everything, nothing keeps billing.\n"
+                                                "No = stay connected with the window closed. The server keeps "
+                                                "billing until it deletes itself at the time you chose; open "
+                                                "the app again any time to see it or press Stop.")
         if ans is None:
             return
         if ans:
@@ -1041,8 +1262,17 @@ def ensure_admin():
     sys.exit(0 if rc > 32 else "Administrator rights are needed to run sing-box.")
 
 
+def already_running():
+    """One window at a time: two copies would fight over the same server and tunnel."""
+    already_running.handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\proxy-on-demand")
+    return ctypes.windll.kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+
+
 if __name__ == "__main__":
     ensure_admin()
+    if already_running():
+        messagebox.showinfo("Proxy on demand", "Proxy on demand is already open. Use the window that is open.")
+        sys.exit(0)
     root = tk.Tk()
     App(root)
     root.mainloop()
