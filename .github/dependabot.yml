@@ -5,6 +5,20 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # These are boto3's own dependencies, and botocore only supports specific major versions of them
+      # (python-dateutil 4.0.0 cannot be installed with botocore 1.x, for example). Their minor and patch
+      # updates are still proposed; new major versions arrive when a boto3/botocore update allows them.
+      - dependency-name: botocore
+        update-types: ["version-update:semver-major"]
+      - dependency-name: s3transfer
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: jmespath
+        update-types: ["version-update:semver-major"]
+      - dependency-name: python-dateutil
+        update-types: ["version-update:semver-major"]
+      - dependency-name: urllib3
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
