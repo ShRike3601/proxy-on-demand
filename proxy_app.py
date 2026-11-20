@@ -497,7 +497,7 @@ WHAT IT IS
 Sharing lets people you trust use your server. They don't need an AWS account: they install Proxy on demand, press "Join a friend" and paste your link. (Any Shadowsocks app, such as sing-box, NekoBox or Shadowrocket, can use the link too.)
 
 TURNING IT ON
-Settings > Sharing > "Let people I trust use my server". While it's on, your server accepts connections from any network; the key inside the link is the only lock. Turning it off closes the server to everyone but your own network again.
+Tick "Share my server" at the bottom of the main window. While it's on, your server accepts connections from any network; the key inside the link is the only lock. Turning it off closes the server to everyone but your own network again.
 
 THE LINK
 Press "Copy share link" and send it privately (not in public chats). It works only while your current server runs: after Stop, or when the server deletes itself, the next server gets a new address and a new link. Reconnect keeps the same server, so the link stays valid.
@@ -516,6 +516,12 @@ Their traffic leaves through your server and your AWS account, so you are respon
 
 FOR PEOPLE WHO JOIN
 The server's owner can see your IP address and which sites you visit (not the content of encrypted pages). Only join servers of people you trust. Press Stop to disconnect."""
+
+JOIN_INFO = ("You're connected through someone else's server with a link they shared.\n"
+             "- The owner can see your IP address and which sites you visit (not the content of encrypted pages). "
+             "Only join servers of people you trust.\n"
+             "- The owner pays for your usage and is responsible for it, so use it fairly and legally.\n"
+             "- The link works only while the owner's server runs. If it stops, ask them for a fresh link.")
 
 JOIN_WARNING = ("Paste the share link someone sent you. Before you connect:\n"
                 "- Only join servers of people you trust. The owner can see your IP address and which sites you "
@@ -1229,13 +1235,18 @@ class App:
         status = card(outer, px)
         status.pack(fill="x")
         self.dot = tk.Label(status, text="●", font=("Segoe UI", 22), fg=COLORS["idle"], bg=THEME["card"])
-        self.dot.grid(row=0, column=0, sticky="n", padx=(0, px(10)))
+        self.dot.grid(row=1, column=0, sticky="n", padx=(0, px(10)))
         self.status, self.detail = tk.StringVar(value="Checking..."), tk.StringVar()
-        ttk.Label(status, textvariable=self.status, style="Head.Card.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(status, textvariable=self.status, style="Head.Card.TLabel", wraplength=px(640)).grid(
+            row=1, column=1, sticky="w")
         ttk.Label(status, textvariable=self.detail, style="Muted.Card.TLabel", justify="left",
-                  wraplength=px(640)).grid(row=1, column=1, sticky="w", pady=(px(4), 0))
-        self.theme_btn = ttk.Button(status, text=theme_label(), style="Link.TButton", command=self.toggle_theme)
-        self.theme_btn.grid(row=0, column=2, sticky="ne")
+                  wraplength=px(640)).grid(row=2, column=1, sticky="w", pady=(px(4), 0))
+        corner = ttk.Frame(status, style="Card.TFrame")
+        corner.grid(row=0, column=0, columnspan=2, sticky="e")  # own row: never collides with a long headline
+        self.mode_btn = ttk.Button(corner, style="Link.TButton", command=self.switch_mode)
+        self.mode_btn.pack(side="left", padx=(0, px(16)))
+        self.theme_btn = ttk.Button(corner, text=theme_label(), style="Link.TButton", command=self.toggle_theme)
+        self.theme_btn.pack(side="left")
         status.columnconfigure(1, weight=1)
         self.progress = ttk.Frame(status, style="Card.TFrame")  # gridded by run(), hidden by "done"
         self.bar = ttk.Progressbar(self.progress, mode="determinate", maximum=1000)
@@ -1243,23 +1254,15 @@ class App:
         self.step_text = tk.StringVar()
         ttk.Label(self.progress, textvariable=self.step_text, style="Muted.Card.TLabel").pack(anchor="w", pady=(px(6), 0))
 
-        # buttons
-        self.controls = ttk.Frame(outer)
+        # screen 1: my own server
+        self.own_view = ttk.Frame(outer)
+        self.controls = ttk.Frame(self.own_view)
         self.controls.pack(fill="x", pady=px(16))
         self.start_btn = ttk.Button(self.controls, text="Start", style="Accent.TButton", command=self.start)
-        self.stop_btn = ttk.Button(self.controls, text="Stop", command=self.stop)
-        self.buttons = [self.start_btn, self.stop_btn,
-                        ttk.Button(self.controls, text="Refresh", command=self.refresh),
-                        ttk.Button(self.controls, text="Settings", command=self.settings_dialog),
-                        ttk.Button(self.controls, text="Join a friend", command=self.join_dialog)]
-        for b in self.buttons:
-            b.pack(side="left", padx=(0, px(8)))
-        self.activity_btn = ttk.Button(self.controls, text="Show activity", command=self.toggle_activity)
-        self.activity_btn.pack(side="right")
-        ttk.Button(self.controls, text="Logs", command=lambda: os.startfile(APP_DIR)).pack(side="right", padx=px(8))
-
-        # the next session in one plain line; everything optional lives in Settings > Advanced
-        plan = card(outer, px)
+        own_buttons = [self.start_btn, ttk.Button(self.controls, text="Stop", command=self.stop),
+                       ttk.Button(self.controls, text="Refresh", command=self.refresh),
+                       ttk.Button(self.controls, text="Settings", command=self.settings_dialog)]
+        plan = card(self.own_view, px)
         plan.pack(fill="x")
         self.cost = tk.StringVar()
         ttk.Label(plan, textvariable=self.cost, style="Muted.Card.TLabel", wraplength=px(640),
@@ -1267,26 +1270,54 @@ class App:
         ttk.Button(plan, text="Change in Settings", style="Link.TButton",
                    command=lambda: self.settings_dialog(advanced=True)).pack(side="right", anchor="n")
         self.update_cost()
-
-        # sharing: always says whether it's on, and who is connected while it is
-        share = card(outer, px)
+        share = card(self.own_view, px)  # sharing: the switch, the link, and who is connected
         share.pack(fill="x", pady=(px(12), 0))
         head = ttk.Frame(share, style="Card.TFrame")
         head.pack(fill="x")
         self.share_head, self.share_text = tk.StringVar(value="Sharing is off"), tk.StringVar()
         ttk.Label(head, textvariable=self.share_head, style="Title.Card.TLabel").pack(side="left")
         ttk.Button(head, text="How sharing works", style="Link.TButton", command=self.sharing_help).pack(side="right")
+        self.share_var = tk.BooleanVar(value=load_settings()["sharing"])
+        ttk.Checkbutton(head, text="Share my server", variable=self.share_var, style="Card.TCheckbutton",
+                        command=self.toggle_sharing).pack(side="right", padx=(0, px(16)))
         self.copy_btn = ttk.Button(head, text="Copy share link", style="Outline.TButton", command=self.copy_share_link)
         ttk.Label(share, textvariable=self.share_text, style="Muted.Card.TLabel", wraplength=px(640),
                   justify="left").pack(anchor="w", pady=(px(6), 0))
-        self.show_sharing({"state": "off"})
+        self.show_sharing({"state": "on" if self.share_var.get() else "off"})
+
+        # screen 2: a friend's server
+        self.join_view = ttk.Frame(outer)
+        join_controls = ttk.Frame(self.join_view)
+        join_controls.pack(fill="x", pady=px(16))
+        join_buttons = [ttk.Button(join_controls, text="Connect with a link", style="Accent.TButton",
+                                   command=self.join_dialog),
+                        ttk.Button(join_controls, text="Disconnect", command=self.stop),
+                        ttk.Button(join_controls, text="Refresh", command=self.refresh)]
+        about = card(self.join_view, px)
+        about.pack(fill="x")
+        ttk.Label(about, text="Using a friend's server", style="Title.Card.TLabel").pack(anchor="w")
+        ttk.Label(about, text=JOIN_INFO, style="Muted.Card.TLabel", wraplength=px(640), justify="left").pack(
+            anchor="w", pady=(px(6), 0))
+        ttk.Button(about, text="How sharing works", style="Link.TButton", command=self.sharing_help).pack(
+            anchor="w", pady=(px(8), 0))
+
+        self.buttons, self.activity_btns = own_buttons + join_buttons, []
+        for bar, buttons in ((self.controls, own_buttons), (join_controls, join_buttons)):
+            for b in buttons:
+                b.pack(side="left", padx=(0, px(8)))
+            act = ttk.Button(bar, text="Show activity", command=self.toggle_activity)
+            act.pack(side="right")
+            self.activity_btns.append(act)
+            ttk.Button(bar, text="Logs", command=lambda: os.startfile(APP_DIR)).pack(side="right", padx=px(8))
 
         # activity log, folded away until asked for
         self.activity = card(outer, px)
         self.out = scrolledtext.ScrolledText(self.activity, height=9, font=("Consolas", 10), state="disabled",
                                              relief="flat", borderwidth=0, bg=THEME["card"], fg=THEME["text"])
         self.out.pack(fill="both", expand=True)
-        self.cards = [status, plan, share, self.activity]
+        self.cards = [status, plan, share, about, self.activity]
+        self.mode = None
+        self.set_mode("join" if self.joined else "own")
         fit_to_screen(root, px)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -1301,6 +1332,7 @@ class App:
     def launch_choice(self):
         """On launch: show what's running, or ask whether to run your own server or join a friend's."""
         if startup_mode(self.joined, singbox_running()) == "resume":
+            self.set_mode("join" if self.joined else "own")
             return self.refresh()
         self.set_status("Welcome", "idle", "Run your own server, or join a server a friend shared with you.")
         px = self.px
@@ -1330,6 +1362,8 @@ class App:
                    f"+{self.root.winfo_rooty() + px(40)}")
         w.wait_window()
         if choice["go"] == "join":
+            self.set_mode("join")
+            self.set_status("Not connected", "idle", "Press Connect with a link and paste the link your friend sent.")
             self.join_dialog()
         elif choice["go"] == "own" and not load_key():
             self.set_status("Set up your AWS access", "idle", "Paste your AWS access key and choose a region, then "
@@ -1396,6 +1430,8 @@ class App:
     def show_sharing(self, info):
         """Bottom panel. info["state"]: off | on | joined, plus server/peers/mine while sharing."""
         st = info["state"]
+        if st in ("on", "off") and hasattr(self, "share_var"):
+            self.share_var.set(st == "on")
         self.copy_btn.pack_forget()
         if st == "joined":
             self.share_head.set("Using a friend's shared server")
@@ -1403,8 +1439,8 @@ class App:
                                 "your IP address and which sites you visit. Press Stop to disconnect.")
         elif st == "off":
             self.share_head.set("Sharing is off")
-            self.share_text.set("Only this laptop can use your server. To let people you trust use it, turn on "
-                                "Settings > Sharing.")
+            self.share_text.set("Only this laptop can use your server. To let people you trust use it, tick "
+                                "Share my server.")
         elif not info.get("server"):
             self.share_head.set("Sharing is on")
             self.share_text.set("Start your server to get a link. Anyone you send it to can connect while it runs.")
@@ -1532,13 +1568,57 @@ class App:
         save_settings({"joined": ""})
 
     def toggle_activity(self):
-        if self.activity.winfo_ismapped():
-            self.activity.pack_forget()
-            self.activity_btn.config(text="Show activity")
-        else:
+        showing = not self.activity.winfo_ismapped()
+        if showing:
             self.activity.pack(fill="both", expand=True, pady=(self.px(14), 0))
-            self.activity_btn.config(text="Hide activity")
+        else:
+            self.activity.pack_forget()
+        for b in self.activity_btns:
+            b.config(text="Hide activity" if showing else "Show activity")
         self.root.geometry("")  # let the window grow or shrink to its content
+
+    def set_mode(self, mode):
+        """Show one screen: 'own' (run my own server) or 'join' (use a friend's server)."""
+        self.mode = mode
+        hide, show = (self.join_view, self.own_view) if mode == "own" else (self.own_view, self.join_view)
+        hide.pack_forget()
+        if self.activity.winfo_ismapped():
+            show.pack(fill="x", before=self.activity)
+        else:
+            show.pack(fill="x")
+        self.mode_btn.config(text="Use a friend's server instead" if mode == "own" else "Run my own server instead")
+        self.root.geometry("")
+
+    def switch_mode(self):
+        if self.busy:
+            return
+        if self.mode == "own":
+            if self.server_up:
+                return messagebox.showinfo("Proxy on demand", "Your own server is running and billing. Press Stop "
+                                                              "first, then switch to a friend's server.")
+            self.set_mode("join")
+            self.set_status("Not connected", "idle", "Press Connect with a link and paste the link your friend sent.")
+            return
+        if self.joined:
+            if not messagebox.askyesno("Proxy on demand", "Disconnect from your friend's server?"):
+                return
+            self.leave_join()
+            self.log("Disconnected from your friend's server")
+        self.set_mode("own")
+        self.refresh()
+
+    def toggle_sharing(self):
+        on = self.share_var.get()
+        if self.busy:  # never change the firewall in the middle of Start or Stop
+            return self.share_var.set(not on)
+        if on and not sharing_agreement(self.root, self.px):
+            return self.share_var.set(False)
+        save_settings({"sharing": on})
+        if self.server_up:
+            self.log("Sharing " + ("turned on: opening" if on else "turned off: closing") + " the server's firewall")
+            self.start()  # Reconnect: re-applies the firewall for the new setting
+        else:
+            self.show_sharing({"state": "on" if on else "off", "server": False})
 
     def update_cost(self):
         s = load_settings()
@@ -1625,7 +1705,7 @@ class App:
             b.config(state="disabled")
         self.steps, self.step_index, self.step_started = steps, 0, time.time()
         self.bar["value"] = 0
-        self.progress.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(self.px(14), 0))
+        self.progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(self.px(14), 0))
         self.status.set(headline)
         self.detail.set("")
         self.dot.config(fg=COLORS["busy"])
@@ -1752,6 +1832,9 @@ class App:
         def job():
             if self.joined:
                 return self.report_joined()
+            if self.mode == "join":
+                return self.set_status("Not connected", "idle",
+                                       "Press Connect with a link and paste the link your friend sent.")
             self.step("signin")
             aws = self.aws()
             self.step("check")
@@ -1848,7 +1931,7 @@ class App:
         tabs = ttk.Notebook(body)
         tabs.pack(fill="both", expand=True)
         pages = {}
-        for name in ("AWS access", "Server & data", "Security", "Sharing"):
+        for name in ("AWS access", "Server & data", "Security"):
             pages[name] = ttk.Frame(tabs, padding=(0, px(12), 0, 0))
             tabs.add(pages[name], text=name)
 
@@ -1911,21 +1994,6 @@ class App:
         ssm_role.insert(0, s["ssm_role"])
         note(sec, 5, "Optional: an EC2 role that lets you open a shell on the server from the AWS console.")
 
-        shr = section(pages["Sharing"], "Share your server")
-        shr.pack(fill="x")
-        sharing = tk.BooleanVar(value=s["sharing"])
-
-        def confirm_sharing():
-            if sharing.get() and not sharing_agreement(w, self.px):
-                sharing.set(False)
-        ttk.Checkbutton(shr, text="Let people I trust use my server with a link", variable=sharing,
-                        style="Card.TCheckbutton", command=confirm_sharing).grid(row=1, column=0, columnspan=2,
-                                                                                  sticky="w")
-        note(shr, 2, "While on, your server accepts connections from any network, and the key inside the link is "
-                     "the only lock. You pay for everyone's usage and are responsible for it. Turning it off closes "
-                     "the server to everyone but your own network again. Changes apply right away (Reconnect).")
-        ttk.Button(shr, text="How sharing works", style="Outline.TButton",
-                   command=lambda: self.sharing_help(w)).grid(row=3, column=0, columnspan=2, sticky="w")
 
         def update_mode():
             mode_note.config(text=(
@@ -2013,16 +2081,11 @@ class App:
                 self.log(f"AWS key saved, encrypted (user {record['user_arn'].split('/')[-1]})")
             save_settings({"mfa": mfa.get(), "region": r, "ssm_role": ssm_role.get().strip(),
                            "allow_over": over.get(), "max_hours": clamp_hours(hours.get()),
-                           "size": size_names[size.get()], "sharing": sharing.get()})
+                           "size": size_names[size.get()]})
             self.session = None  # settings or key changed: sign in again
             self.update_cost()
             w.destroy()
-            if sharing.get() != s["sharing"] and self.server_up and not self.joined:
-                self.log("Sharing " + ("turned on: opening" if sharing.get() else "turned off: closing")
-                         + " the server's firewall")
-                self.start()  # Reconnect: re-applies the firewall for the new sharing setting
-            else:
-                self.refresh()  # signs in (with the MFA code if enabled) and proves the setup works
+            self.refresh()  # signs in (with the MFA code if enabled) and proves the setup works
 
         buttons = ttk.Frame(body)
         buttons.pack(fill="x", pady=(px(16), 0))
@@ -2155,8 +2218,9 @@ class App:
                 self.log("Disconnected from your friend's server")
                 self.leave_join()
                 self.set_status("Not connected", "idle", "You left your friend's server.")
-                self.q.put(("sharing", {"state": "on" if load_settings()["sharing"] else "off"}))
                 return
+            if self.mode == "join":
+                return self.set_status("Not connected", "idle", "You aren't connected to a friend's server.")
             self.log("Stopping sing-box")
             stop_singbox()
             self.connected_ip = None

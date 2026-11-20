@@ -353,7 +353,8 @@ class FakeAws:
 def fake_app(aws):
     a = app.App.__new__(app.App)
     a.q, a.busy, a.warp_was_on, a.server_up, a.first_check = queue.Queue(), False, False, False, False
-    a.connected_ip, a.health_failures, a.joined, a.server_ip = None, 0, None, None
+    a.connected_ip, a.health_failures, a.joined, a.server_ip, a.mode = None, 0, None, None, "own"
+    a.over_limit_warned = None
     a.log = lambda m: None
     a.save_hours = lambda: None
     a.run = lambda job, steps, headline: job()  # synchronous, exceptions propagate
@@ -710,6 +711,42 @@ p.show_sharing({"state": "on", "server": True, "peers": over, "mine": set()})
 assert "6 of 5" in p.share_head.get() and "Over the limit of 5" in p.share_text.get()
 p.show_sharing(cases["joined"][0])
 assert "5.6.7.8" in p.share_text.get()
+root.destroy()
+
+# the friend's-server screen: Refresh and Disconnect never touch AWS, even when not connected
+a = fake_app(NoAws())
+a.aws = lambda: (_ for _ in ()).throw(AssertionError("join screen must not sign in to AWS"))
+a.mode = "join"
+a.refresh()
+a.stop()
+assert all("Not connected" in m[0] for k, m in kinds(a) if k == "status")
+
+# the sharing switch: reverted if busy or the agreement is declined; with a server running it reconnects
+import tkinter as tk
+root = tk.Tk()
+root.withdraw()
+sw = fake_app(FakeAws())
+sw.root, sw.px, sw.share_var = root, (lambda n: n), tk.BooleanVar(master=root, value=True)
+started, shown = [], []
+sw.start, sw.show_sharing = (lambda: started.append(1)), (lambda info: shown.append(info))
+sw.busy = True
+sw.toggle_sharing()
+assert sw.share_var.get() is False and sw.saved == {}, "busy: nothing changes"
+sw.busy, real_agree = False, app.sharing_agreement
+app.sharing_agreement = lambda parent, px: False
+sw.share_var.set(True)
+sw.toggle_sharing()
+assert sw.share_var.get() is False and sw.saved == {}, "agreement declined: sharing stays off"
+app.sharing_agreement = lambda parent, px: True
+sw.share_var.set(True)
+sw.server_up = False
+sw.toggle_sharing()
+assert sw.saved == {"sharing": True} and not started and shown[-1]["state"] == "on"
+sw.server_up = True
+sw.share_var.set(False)
+sw.toggle_sharing()
+assert sw.saved == {"sharing": False} and started == [1], "with a server running, Reconnect applies the firewall"
+app.sharing_agreement = real_agree
 root.destroy()
 
 # launch: ask "own server or join" unless something is already running

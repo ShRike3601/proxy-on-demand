@@ -119,9 +119,9 @@ With MFA, the stored key alone can do nothing: every sign-in also needs a 6-digi
 | **Stop** | Disconnects you first, so your normal internet returns, then deletes the server and checks that nothing is left billing. |
 | **Refresh** | Re-checks AWS and the connection. |
 | **Settings** | Access key and region on the first tab; server size, auto-delete time, data limit, MFA and sharing on the others. See [Settings](#settings). |
-| **Join a friend** | Connect to someone's shared server with their link. See [Joining a friend's server](#joining-a-friends-server). |
+| **Use a friend's server instead / Run my own server instead** (top right) | Switches between the two screens: your own server (Start, Stop, Settings, sharing), or a friend's server (Connect with a link, Disconnect). Each shows only its own buttons. See [Joining a friend's server](#joining-a-friends-server). |
 | **☾ Dark / ☀ Light** (top right) | Switches the theme instantly. The app starts in your Windows theme. |
-| **Sharing** (bottom) | Whether sharing is on, the share link, and the devices connected right now. See [Sharing your server](#sharing-your-server). |
+| **Sharing** (bottom) | The **Share my server** switch, the share link, and the devices connected right now. See [Sharing your server](#sharing-your-server). |
 | **Logs** | Opens the folder that holds `app.log`. |
 | **Show activity** | Unfolds a log of everything the app does, step by step. The same text is saved in `app.log`. |
 
@@ -134,7 +134,6 @@ The window sizes itself from your screen's scaling setting, so it looks the same
 | **AWS access** | Access key, region, and **Copy IAM policy**. All a beginner needs. |
 | **Server & data** | **Size**: Small (`t3.micro`, default), Medium (`t3.small`) or Large (`t3.medium`, for more people at once), with a live estimate of the hourly and per-session cost. **Delete after** 1–24 hours. **Allow going over the free 100 GB** of data a month. |
 | **Security** | Optional MFA, and an optional Session Manager role. |
-| **Sharing** | Let people you trust use your server with a link (asks you to agree to the rules first), and **How sharing works**. |
 
 Approximate prices, Mumbai, for server + public IP + disk:
 - Small: about $0.017/h
@@ -199,7 +198,7 @@ The line under it shows the cost of your choice, for example *"about $0.018 per 
 
 ### Sharing your server
 
-You can let **up to 5 devices at once** (you included) use your server. The people you share with need no AWS account: they install this app and press **Join a friend**. The app also explains all of this under **How sharing works** (bottom of the main window).
+You can let **up to 5 devices at once** (you included) use your server. The people you share with need no AWS account: they install this app and choose **Join a friend's server**. The app also explains all of this under **How sharing works** (bottom of the main window).
 
 **Before you start, understand:**
 - **You pay** for everything on your server: its running time and **all the data**. Everyone shares your free 100 GB a month; when it's used up, the server stops for everyone.
@@ -207,11 +206,11 @@ You can let **up to 5 devices at once** (you included) use your server. The peop
 - **You can see their IP address** and which sites they visit (not the content of encrypted pages). Tell them so.
 
 **How it works:**
-1. **Turn it on:** Settings → **Sharing** → "Let people I trust use my server". The first time, you tick an agreement covering the points above.
+1. **Turn it on:** tick **Share my server** at the bottom of the main window. The first time, you tick an agreement covering the points above.
    - While it's on, your server's port 443 accepts connections from **any network**, and the key inside the link is the only lock.
    - If a server is running, the change applies at once (the app reconnects).
 2. **Share the link:** while your server runs, press **Copy share link** and send it privately, never in public chats or posts.
-3. **Your friend connects:** they press **Join a friend** and paste the link. Any Shadowsocks app works too: sing-box, NekoBox, Shadowrocket.
+3. **Your friend connects:** they choose **Join a friend's server**, press **Connect with a link** and paste it. Any Shadowsocks app works too: sing-box, NekoBox, Shadowrocket.
 4. **See who is connected:** the bottom of the main window shows "Sharing is on · 2 of 5 devices connected" and lists each device by IP address, with yours marked "(you)".
    - With one shared link, the server can't tell people apart by name, and two people on the same Wi-Fi count as one.
    - If more than 5 connect, the app warns you, because your link has probably been passed on. (The limit is shown and warned about, not yet enforced by the server.)
@@ -230,9 +229,9 @@ Then share a fresh link only with the people you still want.
 
 ### Joining a friend's server
 
-1. Open the app and choose **Join a friend's server**, or press **Join a friend** on the main window.
-2. Paste the link (it starts with `ss://`) and press **Connect**.
-3. **Stop** disconnects you. It never touches anyone's AWS account.
+1. Open the app and choose **Join a friend's server**, or click **Use a friend's server instead** at the top right. You get a separate, simpler screen: **Connect with a link**, **Disconnect**, **Refresh**.
+2. Press **Connect with a link**, paste the link (it starts with `ss://`) and press **Connect**.
+3. **Disconnect** leaves. It never touches anyone's AWS account.
 
 **Before you join:**
 - Only join servers of people you trust. **The owner can see your IP address and which sites you visit** (not the content of encrypted pages).
