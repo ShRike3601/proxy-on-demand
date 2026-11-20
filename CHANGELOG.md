@@ -2,6 +2,11 @@
 
 All notable changes to this project. Versions follow [Semantic Versioning](https://semver.org/). Each version's section here becomes its GitHub Release notes.
 
+## Unreleased
+
+- "Copy IAM policy" and the role buttons now look like buttons: outlined in the accent colour.
+- After copying a policy, the pop-up lists the exact steps and names to use (`proxy-on-demand-ec2`, `proxy-on-demand`, `proxy-on-demand-role`), and offers to open the matching README section in your browser.
+
 ## 1.2.0
 
 - **Simpler by default.** MFA is now an opt-in extra (Settings → Security). The Quick Start leads with the quickest path: run from source, one IAM user, one policy.

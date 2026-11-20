@@ -27,6 +27,7 @@ import threading
 import time
 import tkinter as tk
 import urllib.request
+import webbrowser
 import zipfile
 from datetime import datetime, timedelta, timezone
 from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
@@ -370,6 +371,35 @@ def key_policy():
          "Resource": f"arn:aws:iam::*:role/{ROLE_NAME}"},
         {"Sid": "FindOwnMfaDevice", "Effect": "Allow", "Action": "iam:ListMFADevices",
          "Resource": "arn:aws:iam::*:user/${aws:username}"}]}
+
+
+POLICY_NAME, KEY_POLICY_NAME, USER_NAME = "proxy-on-demand-ec2", "proxy-on-demand-key", "proxy-on-demand"
+MFA_GUIDE = "extra-security-with-mfa-optional"
+# After each Copy button: (pop-up title, numbered steps with the exact names, README section anchor)
+COPY_GUIDES = {
+    "user": ("IAM policy copied", (
+        f"1. IAM > Policies > Create policy > JSON tab. Replace everything with Ctrl+V.\n"
+        f"2. Next. Policy name: {POLICY_NAME}  (exactly). Create policy.\n"
+        f"3. IAM > Users > Create user. Name: {USER_NAME}. Leave console access off.\n"
+        f"4. Permissions: Attach policies directly > tick {POLICY_NAME} > Create user.\n"
+        f"5. Open the user > Security credentials > Create access key > Local code. Paste both keys here.\n\n"
+        f"Updating an existing setup? Only replace the JSON of {POLICY_NAME} (Policies > {POLICY_NAME} > Edit)."),
+        "step-5-create-the-apps-iam-user"),
+    "mfa_user": ("User policy copied (MFA)", (
+        f"1. IAM > Policies > Create policy > JSON tab. Replace everything with Ctrl+V.\n"
+        f"2. Next. Policy name: {KEY_POLICY_NAME}  (exactly). Create policy.\n"
+        f"3. IAM > Users > {USER_NAME} > Permissions: attach {KEY_POLICY_NAME}, remove {POLICY_NAME}."),
+        MFA_GUIDE),
+    "role_permissions": ("Role permissions copied", (
+        f"1. IAM > Policies > {POLICY_NAME} > Edit > JSON (or Create policy > JSON if it doesn't exist).\n"
+        f"2. Replace everything with Ctrl+V. Save (name it {POLICY_NAME} if new)."),
+        MFA_GUIDE),
+    "trust": ("Role trust policy copied", (
+        f"1. IAM > Roles > Create role > Custom trust policy. Replace everything with Ctrl+V.\n"
+        f"2. Next. Attach {POLICY_NAME}.\n"
+        f"3. Role name: {ROLE_NAME}  (exactly). Create role."),
+        MFA_GUIDE),
+}
 
 
 def trust_policy(user_arn):
@@ -893,6 +923,11 @@ def style_app(root, px, theme="system"):
                 bordercolor=t["line"], lightcolor=t["bg"])
     s.map("TNotebook.Tab", background=[("selected", t["card"])], foreground=[("selected", t["text"])],
           lightcolor=[("selected", t["card"])])
+    s.configure("Outline.TButton", background=t["card"], foreground=t["accent"], bordercolor=t["accent"],
+                lightcolor=t["card"], darkcolor=t["card"], borderwidth=1, relief="solid",
+                font=("Segoe UI", 10, "bold"), padding=(px(14), px(6)))
+    s.map("Outline.TButton", background=[("active", t["hover"])],
+          foreground=[("disabled", t["disabled"])], bordercolor=[("disabled", t["line"])])
     s.configure("Link.TButton", background=t["card"], foreground=t["accent"], relief="flat", borderwidth=0,
                 padding=(0, 0), focuscolor=t["card"])
     s.map("Link.TButton", background=[("active", t["card"])], foreground=[("active", t["accent_hover"])])
@@ -1309,7 +1344,7 @@ class App:
         region.set(s["region"])
         note(basic, 4, "Leave the key fields empty to keep the key already saved. It is stored encrypted for your "
                        "Windows account and never shown again. Choose the AWS region nearest to you.")
-        ttk.Button(basic, text="Copy IAM policy", command=lambda: copy_user_policy()).grid(
+        ttk.Button(basic, text="Copy IAM policy", style="Outline.TButton", command=lambda: copy_user_policy()).grid(
             row=5, column=0, columnspan=2, sticky="w")
 
         server = section(pages["Server & data"], "Server")
@@ -1350,8 +1385,10 @@ class App:
         mode_note = note(sec, 2)
         role_bar = ttk.Frame(sec, style="Card.TFrame")
         role_bar.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, px(6)))
-        role_buttons = [ttk.Button(role_bar, text="Copy role trust policy", command=lambda: copy_trust_policy()),
-                        ttk.Button(role_bar, text="Copy role permissions", command=lambda: copy_role_permissions())]
+        role_buttons = [ttk.Button(role_bar, text="Copy role trust policy", style="Outline.TButton",
+                                   command=lambda: copy_trust_policy()),
+                        ttk.Button(role_bar, text="Copy role permissions", style="Outline.TButton",
+                                   command=lambda: copy_role_permissions())]
         for b in role_buttons:
             b.pack(side="left", padx=(0, px(8)))
         ssm_role = field(sec, 4, "Session Manager role", ttk.Entry(sec, width=40))
@@ -1381,10 +1418,13 @@ class App:
                 return None
             return r
 
-        def copy(text, title, where):
+        def copy(text, guide):
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
-            messagebox.showinfo(title, "Copied to the clipboard.\n\n" + where, parent=w)
+            title, steps, anchor = COPY_GUIDES[guide]
+            if messagebox.askyesno(title, f"Copied to the clipboard. Now, in the AWS console:\n\n{steps}\n\n"
+                                          "Open the step-by-step guide in your browser?", parent=w):
+                webbrowser.open(f"https://github.com/{REPO}#{anchor}")
 
         def typed_or_saved_record():
             kid, sec_ = key_id.get().strip(), secret.get().strip()
@@ -1399,22 +1439,16 @@ class App:
 
         def copy_user_policy():
             if mfa.get():
-                copy(json.dumps(key_policy(), indent=2), "User policy",
-                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-key, and attach it "
-                     "to the proxy-on-demand user (README: Extra security with MFA).")
+                copy(json.dumps(key_policy(), indent=2), "mfa_user")
                 return
             r = region_ok()
             if r:  # no MFA: the user itself holds the least-privilege EC2 permissions
-                copy(json.dumps(iam_policy(r, ssm_role.get().strip()), indent=2), "User policy",
-                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-ec2, and attach it to "
-                     "the proxy-on-demand user (README, Quick Start step 5).")
+                copy(json.dumps(iam_policy(r, ssm_role.get().strip()), indent=2), "user")
 
         def copy_role_permissions():
             r = region_ok()
             if r:
-                copy(json.dumps(iam_policy(r, ssm_role.get().strip()), indent=2), "Role permissions",
-                     "IAM > Policies > Create policy > JSON: paste and name it proxy-on-demand-ec2 "
-                     "(README: Extra security with MFA).")
+                copy(json.dumps(iam_policy(r, ssm_role.get().strip()), indent=2), "role_permissions")
 
         def copy_trust_policy():
             try:
@@ -1424,9 +1458,7 @@ class App:
             if not record:
                 return messagebox.showerror("Settings", "Enter the access key first: the trust policy names "
                                             "the user that owns it.", parent=w)
-            copy(json.dumps(trust_policy(record["user_arn"]), indent=2), "Role trust policy",
-                 f"IAM > Roles > Create role > Custom trust policy: paste, attach proxy-on-demand-ec2, and name "
-                 f"the role {ROLE_NAME} (README: Extra security with MFA).")
+            copy(json.dumps(trust_policy(record["user_arn"]), indent=2), "trust")
 
         def save():
             r = region_ok()

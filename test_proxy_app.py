@@ -1,6 +1,7 @@
 """Offline checks for proxy_app (no AWS calls). Run: python test_proxy_app.py"""
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -558,6 +559,18 @@ a.report(aws)
 msgs = kinds(a)
 assert any(k == "warn" and "stopped itself" in m for k, m in msgs)
 assert any(k == "status" and "free 100 GB of data is used up" in m[0] for k, m in msgs)
+
+# copy guides: each points to a real README heading and uses the names the README tells people to type
+readme = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md"), encoding="utf-8").read()
+slug = lambda h: re.sub(r"[^\w\- ]", "", h.strip().lower()).replace(" ", "-")  # GitHub's heading anchors
+anchors = {slug(line.lstrip("#")) for line in readme.splitlines() if line.startswith("#")}
+for key, (title, steps, anchor) in app.COPY_GUIDES.items():
+    assert anchor in anchors, f"guide {key} links to #{anchor}, which isn't a README heading"
+for name in (app.POLICY_NAME, app.KEY_POLICY_NAME, app.USER_NAME, app.ROLE_NAME):
+    assert f"`{name}`" in readme, f"{name} must match the README"
+src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_app.py"), encoding="utf-8").read()
+used = set(re.findall(r'copy\(json\.dumps\([^\n]*\), "(\w+)"\)', src))
+assert used == set(app.COPY_GUIDES), f"every Copy button needs a guide: {used} vs {set(app.COPY_GUIDES)}"
 
 # versions and the update notice
 assert app.version_tuple("v1.2.10") == (1, 2, 10) and app.version_tuple("1.0.0") == (1, 0, 0)
