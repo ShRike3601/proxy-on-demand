@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 
 import proxy_app as app
+DEFAULTS = dict(app.DEFAULT_SETTINGS)
 REAL = {n: getattr(app, n) for n in ("record_instance", "load_ledger", "save_ledger")}  # before fakes replace them
 
 # set_server changes only ss-out.server, keeps a backup, writes no BOM
@@ -41,16 +42,54 @@ aws = app.Aws.__new__(app.Aws)
 aws.log = lambda m: None
 aws.ec2 = FakeEc2([{"IpProtocol": p, "FromPort": 443, "ToPort": 443, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]}
                    for p in ("tcp", "udp")])
+rules = lambda: {(r["IpProtocol"], r["FromPort"]): sorted(x["CidrIp"] for x in r["IpRanges"]) for r in aws.ec2.perms}
 aws.allow_only("sg-1", {"1.2.3.4"})
 assert aws.ec2.calls == ["revoke", "auth"]
-assert sorted(r["IpProtocol"] for r in aws.ec2.perms) == ["tcp", "udp"]
-assert all(r["IpRanges"][0]["CidrIp"] == "1.2.3.4/32" and len(r["IpRanges"]) == 1 for r in aws.ec2.perms)
+assert rules() == {("tcp", 443): ["1.2.3.4/32"], ("udp", 443): ["1.2.3.4/32"], ("tcp", app.STATUS_PORT): ["1.2.3.4/32"]}
 aws.ec2.calls = []
 aws.allow_only("sg-1", {"1.2.3.4"})
 assert aws.ec2.calls == [], "should not touch rules that are already correct"
 aws.allow_only("sg-1", {"1.2.3.4", "5.6.7.8"})  # a network with two public IPs: both allowed, nothing else
 assert aws.ec2.calls == ["revoke", "auth"]
-assert all(sorted(x["CidrIp"] for x in r["IpRanges"]) == ["1.2.3.4/32", "5.6.7.8/32"] for r in aws.ec2.perms)
+assert all(v == ["1.2.3.4/32", "5.6.7.8/32"] for v in rules().values())
+# sharing on: the proxy port opens to everyone, the status page stays owner-only; off closes it again
+aws.allow_only("sg-1", {"1.2.3.4"}, sharing=True)
+assert rules() == {("tcp", 443): ["0.0.0.0/0"], ("udp", 443): ["0.0.0.0/0"], ("tcp", app.STATUS_PORT): ["1.2.3.4/32"]}
+aws.allow_only("sg-1", {"1.2.3.4"}, sharing=False)
+assert rules()[("tcp", 443)] == ["1.2.3.4/32"] and "0.0.0.0/0" not in str(rules())
+aws.ec2.perms = [{"IpProtocol": "tcp", "FromPort": app.STATUS_PORT, "IpRanges": [{"CidrIp": "9.9.9.9/32"}]}]
+assert aws.owner_ips({"SecurityGroups": [{"GroupId": "sg-1"}]}) == {"9.9.9.9"}
+assert aws.owner_ips({}) == set()
+
+# share links: round trip, older base64 style, and clear errors for bad input
+link = app.share_link("13.1.2.3", "abc+/=XYZ==")
+assert link.startswith("ss://2022-blake3-aes-128-gcm:") and app.parse_link(link) == ("13.1.2.3", 443, app.METHOD, "abc+/=XYZ==")
+import base64 as _b64
+legacy = "ss://" + _b64.urlsafe_b64encode(b"aes-256-gcm:pw").decode().rstrip("=") + "@1.2.3.4:8388#x"
+assert app.parse_link("  " + legacy + "\n") == ("1.2.3.4", 8388, "aes-256-gcm", "pw")
+for bad in ("", "https://example.com", "ss://nopassword", "ss://a:b@host", "ss://@1.2.3.4:443", "ss://%%%@1.2.3.4:443"):
+    try:
+        app.parse_link(bad); raise AssertionError(f"accepted {bad!r}")
+    except ValueError:
+        pass
+
+# status page: on the server only with a token; it answers only at /<token>; the app reads it safely
+ud_s = app.user_data("x", 12, 0, "TOK123")
+assert 'TOKEN = "TOK123"' in ud_s and f"HTTPServer((\"0.0.0.0\", {app.STATUS_PORT})" in ud_s and "( sport = :443 )" in ud_s
+assert "ss-status" not in app.user_data("x", 12, 0, ""), "no token, no status page"
+r = subprocess.run([bash, "-n"], input=ud_s.encode(), capture_output=True)
+assert r.returncode == 0, r.stderr
+assert app.server_peers("1.2.3.4", "") is None
+real_urlopen = app.urllib.request.urlopen
+import io as _io
+class Resp2(_io.BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+app.urllib.request.urlopen = lambda url, timeout: Resp2(b'{"1.2.3.4": 2, "5.6.7.8": 1}')
+assert app.server_peers("1.2.3.4", "t") == {"1.2.3.4": 2, "5.6.7.8": 1}
+app.urllib.request.urlopen = lambda url, timeout: (_ for _ in ()).throw(OSError("timeout"))
+assert app.server_peers("1.2.3.4", "t") is None
+app.urllib.request.urlopen = real_urlopen
 
 # my_ips: collects every IPv4 the network shows, ignores junk and failures
 import itertools
@@ -123,7 +162,8 @@ assert app.load_settings(sf) == app.DEFAULT_SETTINGS  # missing file -> defaults
 assert app.DEFAULT_SETTINGS["mfa"] is False, "MFA is an opt-in extra (Settings > Advanced)"
 app.save_settings({"region": "eu-west-1", "ssm_role": "R"}, sf)  # file from before the MFA option existed
 assert app.load_settings(sf) == {"mfa": False, "region": "eu-west-1", "ssm_role": "R", "max_hours": 12, "allow_over": False,
-                                    "size": "t3.micro", "theme": "system"}
+                                    "size": "t3.micro", "sharing": False,
+                                    "sharing_agreed": False, "joined": ""}
 app.save_settings({"mfa": False, "region": "eu-west-1", "ssm_role": ""}, sf)
 assert app.load_settings(sf)["mfa"] is False
 open(sf, "w").write("{broken")
@@ -245,8 +285,8 @@ assert all(not k.startswith(("t4g", "c7g", "m7g")) for k in app.SERVER_SIZES), "
 # settings: unknown size/theme fall back to defaults; theme choice resolves to light or dark
 d = tempfile.mkdtemp()
 sf = os.path.join(d, "settings.json")
-open(sf, "w").write(json.dumps({"size": "x9.huge", "theme": "neon"}))
-assert app.load_settings(sf)["size"] == "t3.micro" and app.load_settings(sf)["theme"] == "system"
+open(sf, "w").write(json.dumps({"size": "x9.huge", "theme": "neon"}))  # theme: no longer a setting
+assert app.load_settings(sf)["size"] == "t3.micro" and "theme" not in app.load_settings(sf)
 shutil.rmtree(d)
 assert app.resolve_theme("dark") == "dark" and app.resolve_theme("light") == "light"
 assert app.resolve_theme("system") in ("light", "dark")
@@ -292,7 +332,8 @@ class FakeAws:
         self.log = lambda m: None
     def default_vpc_subnet(self): return "vpc-1", "subnet-1"
     def security_group(self, vpc): return "sg-1"
-    def allow_only(self, sg, ip): pass
+    def allow_only(self, sg, ip, sharing=False): self.sharing = sharing
+    def owner_ips(self, instance): return {"1.2.3.4"}
     def instances(self): return [i for i in self.insts if i["InstanceId"] not in self.terminated]
     used = 0
     def month_usage(self, ledger): return self.used
@@ -312,17 +353,19 @@ class FakeAws:
 def fake_app(aws):
     a = app.App.__new__(app.App)
     a.q, a.busy, a.warp_was_on, a.server_up, a.first_check = queue.Queue(), False, False, False, False
-    a.connected_ip, a.health_failures = None, 0
+    a.connected_ip, a.health_failures, a.joined, a.server_ip = None, 0, None, None
     a.log = lambda m: None
     a.save_hours = lambda: None
     a.run = lambda job, steps, headline: job()  # synchronous, exceptions propagate
-    app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
+    app.load_settings = lambda path=None: {**DEFAULTS, "mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
                                            "allow_over": False, "size": "t3.micro"}
     mem = {"instances": {}, "warned": {}}
     app.load_ledger = lambda path=None: json.loads(json.dumps(mem))
     app.save_ledger = lambda ledger, path=None: mem.update(ledger)
     app.record_instance = lambda iid, region, path=None, now=None: mem["instances"].update({iid: {"region": region}})
     a.ledger = mem
+    app.save_settings = lambda changes, path=None: a.saved.update(changes)
+    a.saved = {}
     a.aws = lambda: aws
     for name, fn in {"find_singbox": lambda: "sing-box.exe", "ensure_config": lambda: False,
                      "load_config": lambda: {"outbounds": [{"tag": "ss-out", "password": "pw"}]},
@@ -418,7 +461,7 @@ real_load_key, real_assume, real_aws_cls = app.load_key, app.assume, app.Aws
 app.Aws = lambda log, settings, session: ("client-for", session)
 app.assume = lambda record, code, region: (calls.append(code) or "SESSION", datetime.now(timezone.utc) + timedelta(hours=1))
 real_settings = app.load_settings
-app.load_settings = lambda: {"mfa": True, "region": "ap-south-1", "ssm_role": ""}
+app.load_settings = lambda: {**DEFAULTS, "mfa": True, "region": "ap-south-1", "ssm_role": ""}
 b = app.App.__new__(app.App)
 b.q, b.log, b.session, b.session_expiry = queue.Queue(), (lambda m: None), None, None
 app.load_key = lambda: None
@@ -446,7 +489,7 @@ assert calls == ["123456", "123456"]
 # MFA turned off: the key is used directly, never a code prompt, and the session does not expire
 real_key_session = app.key_session
 app.key_session = lambda record: "KEY-SESSION"
-app.load_settings = lambda: {"mfa": False, "region": "ap-south-1", "ssm_role": ""}
+app.load_settings = lambda: {**DEFAULTS, "mfa": False, "region": "ap-south-1", "ssm_role": ""}
 b.session, b.session_expiry, calls[:] = None, None, []
 b.ask_mfa = lambda: (_ for _ in ()).throw(AssertionError("must not ask for MFA when it is off"))
 assert b.aws() == ("client-for", "KEY-SESSION") and b.session_valid() and calls == []
@@ -536,7 +579,7 @@ for used, words in ((None, "can't read"), (99.9 * GB, "used up")):
     except RuntimeError as e:
         assert words in str(e) and aws.launched == [], (words, str(e))
 aws = FakeAws(); a = fake_app(aws); aws.used = 99.9 * GB
-app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
+app.load_settings = lambda path=None: {**DEFAULTS, "mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
                                        "allow_over": True, "size": "t3.micro"}
 app.singbox_running = lambda: True
 a.start()
@@ -571,6 +614,107 @@ for name in (app.POLICY_NAME, app.KEY_POLICY_NAME, app.USER_NAME, app.ROLE_NAME)
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_app.py"), encoding="utf-8").read()
 used = set(re.findall(r'copy\(json\.dumps\([^\n]*\), "(\w+)"\)', src))
 assert used == set(app.COPY_GUIDES), f"every Copy button needs a guide: {used} vs {set(app.COPY_GUIDES)}"
+
+# self-update: verified download, exe swap without duplicates, safe source install, git clones left alone
+import hashlib as _h, contextlib
+def opener_for(files):
+    return lambda url: contextlib.closing(io.BytesIO(files[url.rsplit("/", 1)[1]]))
+good = b"new app"
+files = {"ProxyOnDemand.exe": good, "ProxyOnDemand.exe.sha256": (_h.sha256(good).hexdigest() + "  ProxyOnDemand.exe").encode()}
+assert app.download_verified("v9.9.9", "ProxyOnDemand.exe", opener_for(files)) == good
+files["ProxyOnDemand.exe.sha256"] = b"0" * 64 + b"  ProxyOnDemand.exe"
+try:
+    app.download_verified("v9.9.9", "ProxyOnDemand.exe", opener_for(files)); raise AssertionError("bad checksum accepted")
+except RuntimeError:
+    pass
+d = tempfile.mkdtemp()
+exe = os.path.join(d, "ProxyOnDemand.exe")
+open(exe, "wb").write(b"old app")
+app.install_exe(b"new app", exe)
+assert open(exe, "rb").read() == b"new app" and open(exe + ".old", "rb").read() == b"old app"
+app.install_exe(b"newer app", exe)  # a leftover .old from last time is replaced, never piled up
+assert sorted(os.listdir(d)) == ["ProxyOnDemand.exe", "ProxyOnDemand.exe.old"]
+shutil.rmtree(d)
+d = tempfile.mkdtemp()
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w") as z:
+    z.writestr("proxy_app.py", "v2")
+    z.writestr("policies/key-policy.json", "{}")
+app.install_source(buf.getvalue(), d)
+assert open(os.path.join(d, "proxy_app.py")).read() == "v2" and os.path.exists(os.path.join(d, "policies", "key-policy.json"))
+evil = io.BytesIO()
+with zipfile.ZipFile(evil, "w") as z:
+    z.writestr("proxy_app.py", "v3")
+    z.writestr("../outside.txt", "x")
+try:
+    app.install_source(evil.getvalue(), d); raise AssertionError("path traversal accepted")
+except RuntimeError:
+    pass
+assert open(os.path.join(d, "proxy_app.py")).read() == "v2", "nothing may change when any path is unsafe"
+assert not os.path.exists(os.path.join(os.path.dirname(d), "outside.txt"))
+assert app.update_kind(d) == "source"
+os.makedirs(os.path.join(d, ".git"))
+assert app.update_kind(d) == "git"
+shutil.rmtree(d)
+assert set(app.UPDATE_ASSETS.values()) == {"ProxyOnDemand.exe", "proxy-on-demand-source.zip"}
+wf = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".github", "workflows", "release.yml")).read()
+assert all(f"dist/{n}" in wf and f"dist/{n}.sha256" in wf for n in app.UPDATE_ASSETS.values()), \
+    "every file the updater downloads must be published with its checksum"
+
+# joined a friend's server: Stop only disconnects and never touches AWS; a dead link is reported plainly
+class NoAws:
+    def __getattr__(self, name): raise AssertionError(f"joined mode must not use AWS ({name})")
+a = fake_app(NoAws())
+a.aws = lambda: (_ for _ in ()).throw(AssertionError("joined mode must not sign in to AWS"))
+a.joined = "5.6.7.8"
+stopped = []
+app.stop_singbox, app.singbox_running, app.egress_ip = (lambda: stopped.append(1)), (lambda: True), (lambda: "5.6.7.8")
+a.refresh()
+msgs = kinds(a)
+assert any(k == "status" and m[1] == "ok" and "friend" in m[0] for k, m in msgs) and ("sharing", {"state": "joined", "host": "5.6.7.8"}) in msgs
+app.egress_ip = lambda: "9.9.9.9"  # the friend's server stopped: traffic no longer leaves through it
+a.refresh()
+assert a.joined is None and stopped and a.saved.get("joined") == "" and any(k == "status" and "Disconnected" in m[0] for k, m in kinds(a))
+a.joined, stopped[:] = "5.6.7.8", []
+a.stop()
+assert a.joined is None and stopped and any(k == "status" and "Not connected" in m[0] for k, m in kinds(a))
+app.stop_singbox, app.singbox_running = (lambda: None), (lambda: False)
+
+# sharing panel text for every state (rendered with real Tk variables)
+import tkinter as tk
+root = tk.Tk()
+root.withdraw()
+p = app.App.__new__(app.App)
+p.root, p.px = root, (lambda n: n)
+p.share_head, p.share_text = tk.StringVar(master=root), tk.StringVar(master=root)
+p.copy_btn = type("B", (), {"pack": lambda *a, **k: None, "pack_forget": lambda *a, **k: None})()
+cases = {
+    "off": ({"state": "off"}, "Sharing is off"),
+    "on, no server": ({"state": "on", "server": False}, "Sharing is on"),
+    "on, 2 devices": ({"state": "on", "server": True, "peers": {"1.2.3.4": 2, "5.6.7.8": 1}, "mine": {"1.2.3.4"}},
+                      "Sharing is on · 2 of 5 devices connected"),
+    "on, nobody": ({"state": "on", "server": True, "peers": {}, "mine": set()}, "Sharing is on · 0 of 5 devices connected"),
+    "on, unknown": ({"state": "on", "server": True, "peers": None}, "Sharing is on"),
+    "joined": ({"state": "joined", "host": "5.6.7.8"}, "Using a friend's shared server"),
+}
+for name, (info, head) in cases.items():
+    p.show_sharing(info)
+    text = p.share_text.get()
+    assert p.share_head.get() == head, (name, p.share_head.get())
+    assert "{" not in text and "{" not in p.share_head.get(), (name, text)
+p.show_sharing(cases["on, 2 devices"][0])
+lines = p.share_text.get().splitlines()
+assert lines[0].startswith("•  1.2.3.4  (you)") and "2 connections" in lines[0] and "5.6.7.8" in lines[1], lines
+over = {f"10.0.0.{i}": 1 for i in range(app.SHARE_LIMIT + 1)}
+p.show_sharing({"state": "on", "server": True, "peers": over, "mine": set()})
+assert "6 of 5" in p.share_head.get() and "Over the limit of 5" in p.share_text.get()
+p.show_sharing(cases["joined"][0])
+assert "5.6.7.8" in p.share_text.get()
+root.destroy()
+
+# launch: ask "own server or join" unless something is already running
+assert app.startup_mode(None, False) == "choose"
+assert app.startup_mode("1.2.3.4", False) == "resume" and app.startup_mode(None, True) == "resume"
 
 # versions and the update notice
 assert app.version_tuple("v1.2.10") == (1, 2, 10) and app.version_tuple("1.0.0") == (1, 0, 0)

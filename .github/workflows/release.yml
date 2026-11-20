@@ -29,11 +29,15 @@ jobs:
         run: |
           $p = Start-Process dist\ProxyOnDemand.exe -ArgumentList "--check" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "self-check failed with exit code $($p.ExitCode)" }
-      - name: Checksum
+      - name: Source zip (for in-app updates of copies run from source)
+        run: git archive --format=zip -o dist/proxy-on-demand-source.zip HEAD
+      - name: Checksums
         shell: pwsh
         run: |
-          $h = (Get-FileHash dist\ProxyOnDemand.exe -Algorithm SHA256).Hash.ToLower()
-          "$h  ProxyOnDemand.exe" | Out-File -Encoding ascii dist\ProxyOnDemand.exe.sha256
+          foreach ($f in "ProxyOnDemand.exe", "proxy-on-demand-source.zip") {
+            $h = (Get-FileHash "dist\$f" -Algorithm SHA256).Hash.ToLower()
+            "$h  $f" | Out-File -Encoding ascii "dist\$f.sha256"
+          }
       - name: Publish release
         shell: bash
         env:
@@ -41,4 +45,5 @@ jobs:
         run: |
           notes=$(awk -v v="${GITHUB_REF_NAME#v}" '$0 ~ "^## " v {f=1; next} /^## /{f=0} f' CHANGELOG.md)
           gh release create "$GITHUB_REF_NAME" dist/ProxyOnDemand.exe dist/ProxyOnDemand.exe.sha256 \
+            dist/proxy-on-demand-source.zip dist/proxy-on-demand-source.zip.sha256 \
             --title "Proxy on demand $GITHUB_REF_NAME" --notes "$notes"

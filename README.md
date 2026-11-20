@@ -45,7 +45,11 @@ Follow [Creating a budget](https://docs.aws.amazon.com/cost-management/latest/us
 
 1. Double-click **`Start Proxy App.bat`** (or `ProxyOnDemand.exe`). The first run installs the one Python dependency.
 2. Accept the Windows admin prompt. The app needs admin rights to create its network adapter.
-3. The **Settings** window opens on the **AWS access** tab. Choose the **Region** nearest to you, for example `ap-south-1` (Mumbai), `eu-west-2` (London) or `us-east-1` (N. Virginia). See [all region codes](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html). Keep the window open.
+3. The app asks **"How do you want to connect?"**:
+   - **Run my own server:** the rest of this Quick Start. The first time, **Settings** opens on the **AWS access** tab. Choose the **Region** nearest to you, for example `ap-south-1` (Mumbai), `eu-west-2` (London) or `us-east-1` (N. Virginia). See [all region codes](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html). Keep the window open.
+   - **Join a friend's server:** paste the link they sent you and you're done. You need no AWS account and can skip the rest of this guide. See [Joining a friend's server](#joining-a-friends-server).
+
+   The app asks this every time it opens, unless something is already running (then it shows you that instead).
 
 ### Step 5: Create the app's IAM user
 
@@ -85,7 +89,7 @@ On the first Start the app also downloads sing-box, the VPN engine. It's the off
 
 **Press Stop when you're done.** The app confirms that nothing is left billing.
 
-Everything else (server size, auto-delete time, the data limit, MFA, theme) has sensible defaults. You can change any of it under **Settings**. See [Settings](#settings).
+Everything else (server size, auto-delete time, the data limit, MFA, sharing) has sensible defaults. You can change any of it under **Settings**. See [Settings](#settings).
 
 ### Extra security with MFA (optional)
 
@@ -114,7 +118,10 @@ With MFA, the stored key alone can do nothing: every sign-in also needs a 6-digi
 | **Start / Reconnect** | Start creates a server and connects you. While a server exists the button reads **Reconnect** (see below). |
 | **Stop** | Disconnects you first, so your normal internet returns, then deletes the server and checks that nothing is left billing. |
 | **Refresh** | Re-checks AWS and the connection. |
-| **Settings** | Access key and region on the first tab; server size, auto-delete time, data limit, MFA and theme on the others. See [Settings](#settings). |
+| **Settings** | Access key and region on the first tab; server size, auto-delete time, data limit, MFA and sharing on the others. See [Settings](#settings). |
+| **Join a friend** | Connect to someone's shared server with their link. See [Joining a friend's server](#joining-a-friends-server). |
+| **☾ Dark / ☀ Light** (top right) | Switches the theme instantly. The app starts in your Windows theme. |
+| **Sharing** (bottom) | Whether sharing is on, the share link, and the devices connected right now. See [Sharing your server](#sharing-your-server). |
 | **Logs** | Opens the folder that holds `app.log`. |
 | **Show activity** | Unfolds a log of everything the app does, step by step. The same text is saved in `app.log`. |
 
@@ -127,7 +134,7 @@ The window sizes itself from your screen's scaling setting, so it looks the same
 | **AWS access** | Access key, region, and **Copy IAM policy**. All a beginner needs. |
 | **Server & data** | **Size**: Small (`t3.micro`, default), Medium (`t3.small`) or Large (`t3.medium`, for more people at once), with a live estimate of the hourly and per-session cost. **Delete after** 1–24 hours. **Allow going over the free 100 GB** of data a month. |
 | **Security** | Optional MFA, and an optional Session Manager role. |
-| **Appearance** | Theme: same as Windows, Light or Dark. Applies the next time you open the app. |
+| **Sharing** | Let people you trust use your server with a link (asks you to agree to the rules first), and **How sharing works**. |
 
 Approximate prices, Mumbai, for server + public IP + disk:
 - Small: about $0.017/h
@@ -189,6 +196,65 @@ Below the buttons, choose **"Delete the server automatically after N hours"** (1
 - The server enforces it itself, so it is deleted even if your laptop is off, asleep or the app has crashed.
 
 The line under it shows the cost of your choice, for example *"about $0.018 per hour, so at most about $0.22 if it runs the full 12 h"*. While a server runs, the detail line shows cost so far and the maximum. These are estimates from Mumbai prices; downloads beyond 100 GB a month cost extra. See [Cost](#cost-approximate).
+
+### Sharing your server
+
+You can let **up to 5 devices at once** (you included) use your server. The people you share with need no AWS account: they install this app and press **Join a friend**. The app also explains all of this under **How sharing works** (bottom of the main window).
+
+**Before you start, understand:**
+- **You pay** for everything on your server: its running time and **all the data**. Everyone shares your free 100 GB a month; when it's used up, the server stops for everyone.
+- **You're responsible.** Their traffic leaves through your server and your AWS account, which makes you responsible for it under the [AWS Acceptable Use Policy](https://aws.amazon.com/aup/). Share only with people you trust, never for anything illegal, abusive or unfair, and cut people off if they misuse it.
+- **You can see their IP address** and which sites they visit (not the content of encrypted pages). Tell them so.
+
+**How it works:**
+1. **Turn it on:** Settings → **Sharing** → "Let people I trust use my server". The first time, you tick an agreement covering the points above.
+   - While it's on, your server's port 443 accepts connections from **any network**, and the key inside the link is the only lock.
+   - If a server is running, the change applies at once (the app reconnects).
+2. **Share the link:** while your server runs, press **Copy share link** and send it privately, never in public chats or posts.
+3. **Your friend connects:** they press **Join a friend** and paste the link. Any Shadowsocks app works too: sing-box, NekoBox, Shadowrocket.
+4. **See who is connected:** the bottom of the main window shows "Sharing is on · 2 of 5 devices connected" and lists each device by IP address, with yours marked "(you)".
+   - With one shared link, the server can't tell people apart by name, and two people on the same Wi-Fi count as one.
+   - If more than 5 connect, the app warns you, because your link has probably been passed on. (The limit is shown and warned about, not yet enforced by the server.)
+
+**The link's lifetime:** a link works only while your **current** server runs.
+- After **Stop**, or when the server deletes itself or reaches the data limit, the next server has a new address and a new key, so old links stop working.
+- **Reconnect** keeps the same server, so the link stays valid.
+
+**Removing people:** everyone uses the same key, so you can't remove just one person. To cut everyone off:
+- **Turn sharing off.** Within seconds the server accepts only your own network again.
+- Or **press Stop.** The next server has a new key and address.
+
+Then share a fresh link only with the people you still want.
+
+**Leaving the app open?** Closing the window while sharing warns you that anyone using your link is cut off too if you choose to stop.
+
+### Joining a friend's server
+
+1. Open the app and choose **Join a friend's server**, or press **Join a friend** on the main window.
+2. Paste the link (it starts with `ss://`) and press **Connect**.
+3. **Stop** disconnects you. It never touches anyone's AWS account.
+
+**Before you join:**
+- Only join servers of people you trust. **The owner can see your IP address and which sites you visit** (not the content of encrypted pages).
+- The owner pays for your usage and is responsible for it, so use it fairly and legally.
+- The link stops working when the owner's server stops, or when they turn sharing off. Ask them for a fresh link.
+
+### Light and dark
+
+The app follows Windows' light or dark setting. The **☾ Dark / ☀ Light** switch in the top-right corner changes it instantly for the current session.
+
+### Updating
+
+When a new version is released, the app offers **"Update now?"** when it opens. If you say yes, it:
+1. downloads the new version from this repository's GitHub Releases;
+2. checks it against the release's published checksum;
+3. replaces the old version in place (no duplicate copies are left behind);
+4. restarts.
+
+Your connection stays up during the restart, and your settings and key are kept.
+- **The `.exe`:** the file is swapped in place; the old copy is deleted on the next start.
+- **Run from source:** the app's files in its folder are replaced, and the dependencies are updated.
+- **A git clone:** the app tells you to run `git pull` instead.
 
 ### Closing and reopening the app
 
@@ -373,7 +439,9 @@ The app has no servers or telemetry of its own, and the author receives nothing.
 | **Your own AWS account** (EC2, CloudWatch, IAM/STS) | To create, check and delete your server, and measure its data | Your requests, under your own AWS account. AWS's [privacy notice](https://aws.amazon.com/privacy/) applies. |
 | **Your own server** | The proxy itself | Your internet traffic, encrypted in transit; it's then sent on to the sites you visit. |
 | `checkip.amazonaws.com`, `api.ipify.org`, `ipv4.icanhazip.com` | To find your public IPs for the server's firewall, and to confirm the tunnel works | Your public IP address, as with any website. |
-| `github.com`, `api.github.com` | One-time sing-box download (checksum-verified), the server's Shadowsocks download, and the "new version available" check | Your public IP address. Nothing is uploaded. |
+| `github.com`, `api.github.com` | One-time sing-box download (checksum-verified), the server's Shadowsocks download, the "new version available" check, and updates you accept (checksum-verified) | Your public IP address. Nothing is uploaded. |
+| **Your server's status page** (port 8443, only from your network, secret token) | To list which devices are connected while sharing | Nothing new: your app asks your own server. |
+| **A friend's server**, when you join one | The proxy itself | Your internet traffic: the owner can see your IP address and which sites you visit. |
 
 Your AWS key, proxy password and settings stay on your laptop, in `%USERPROFILE%\.proxy-on-demand`. The key is encrypted for your Windows account.
 
@@ -381,6 +449,8 @@ Your AWS key, proxy password and settings stay on your laptop, in `%USERPROFILE%
 - While connected, sing-box adds a network adapter (`sing-tun`) and routes, and removes them when stopped.
 - If Cloudflare WARP is running, the app disconnects it during a session and reconnects it after Stop.
 - Nothing else is changed.
+
+**People you share with:** while sharing is on, your server sees the IP addresses of connected devices and which sites they visit (not the content of encrypted pages). The app shows you their IP addresses; nothing is stored or sent anywhere else.
 
 ## Uninstall
 

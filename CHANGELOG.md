@@ -2,10 +2,20 @@
 
 All notable changes to this project. Versions follow [Semantic Versioning](https://semver.org/). Each version's section here becomes its GitHub Release notes.
 
-## Unreleased
+## 1.3.0
 
-- "Copy IAM policy" and the role buttons now look like buttons: outlined in the accent colour.
-- After copying a policy, the pop-up lists the exact steps and names to use (`proxy-on-demand-ec2`, `proxy-on-demand`, `proxy-on-demand-role`), and offers to open the matching README section in your browser.
+- **Sharing (simple version).** Let up to 5 devices at once, you included, use your server with one link.
+  - Turn it on in Settings → Sharing, after a one-time agreement: trusted people only, you pay, you're responsible under AWS's Acceptable Use Policy, you'll cut off misuse.
+  - The main window always shows the sharing state; while it's on, it shows the share link and **the devices connected right now** by IP address, with yours marked "(you)".
+  - You're warned if more than 5 connect. The limit is shown and warned about, not yet enforced.
+  - Turning sharing off, or Stop, cuts everyone off.
+- **Join a friend.** Paste a share link to use someone else's server. No AWS account needed. Stop only disconnects you, and the app warns you first that the owner can see your IP address and the sites you visit.
+- **Start screen.** Each launch asks "Run my own server" or "Join a friend's server", unless something is already running. First-time owners land straight on Settings → AWS access.
+- **In-app help:** "How sharing works" explains links, removing people, costs and responsibilities.
+- **One-click updates.** When a new version is released, the app offers to update. It downloads the release, checks its checksum, replaces itself in place with no duplicates left behind, and restarts while your connection stays up. Works for the `.exe` and for run-from-source copies; git clones are told to `git pull`.
+- **Theme switch** (☾/☀) in the window's corner, starting from the Windows setting. The Appearance tab is gone.
+- **Copy buttons** now look like buttons, and after copying, the pop-up lists the exact steps and names (`proxy-on-demand-ec2`, `proxy-on-demand`, `proxy-on-demand-role`), with a link to the matching README section.
+- Servers started by 1.3.0 run a small status page on port 8443, reachable only from your network with a secret token, so the app can list connected devices.
 
 ## 1.2.0
 
