@@ -21,13 +21,17 @@
       }
     },
     {
-      "Sid": "LaunchOnlyTaggedT3Micro",
+      "Sid": "LaunchOnlyTaggedSmallServers",
       "Effect": "Allow",
       "Action": "ec2:RunInstances",
       "Resource": "arn:aws:ec2:ap-south-1:*:instance/*",
       "Condition": {
         "StringEquals": {
-          "ec2:InstanceType": "t3.micro",
+          "ec2:InstanceType": [
+            "t3.micro",
+            "t3.small",
+            "t3.medium"
+          ],
           "aws:RequestTag/app": "ss-proxy-app"
         }
       }

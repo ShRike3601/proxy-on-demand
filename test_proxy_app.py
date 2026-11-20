@@ -119,9 +119,10 @@ shutil.rmtree(d)
 d = tempfile.mkdtemp()
 sf = os.path.join(d, "s", "settings.json")
 assert app.load_settings(sf) == app.DEFAULT_SETTINGS  # missing file -> defaults
-assert app.DEFAULT_SETTINGS["mfa"] is True, "MFA must be on unless the user opts out"
+assert app.DEFAULT_SETTINGS["mfa"] is False, "MFA is an opt-in extra (Settings > Advanced)"
 app.save_settings({"region": "eu-west-1", "ssm_role": "R"}, sf)  # file from before the MFA option existed
-assert app.load_settings(sf) == {"mfa": True, "region": "eu-west-1", "ssm_role": "R", "max_hours": 12, "allow_over": False}
+assert app.load_settings(sf) == {"mfa": False, "region": "eu-west-1", "ssm_role": "R", "max_hours": 12, "allow_over": False,
+                                    "size": "t3.micro", "theme": "system"}
 app.save_settings({"mfa": False, "region": "eu-west-1", "ssm_role": ""}, sf)
 assert app.load_settings(sf)["mfa"] is False
 open(sf, "w").write("{broken")
@@ -223,14 +224,32 @@ app.warp = real_warp
 from datetime import datetime, timedelta, timezone
 now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 t = app.uptime_text(now - timedelta(hours=2, minutes=5), now=now)
-assert t.startswith("Running 2h05m") and "auto-deletes in 9h55m" in t and "at most ~$0.22" in t, t
+assert t.startswith("Running 2h05m") and "auto-deletes in 9h55m" in t and "at most ~$0.21" in t, t
 assert "in 0h00m" in app.uptime_text(now - timedelta(hours=30), now=now)
 t = app.uptime_text(now - timedelta(minutes=10), 3, now=now)
 assert "auto-deletes in 2h50m" in t and "at most ~$0.05" in t and "less than $0.01" in t, t
+t = app.uptime_text(now - timedelta(hours=1), 12, now=now, size="t3.medium")
+assert "cost so far ~$0.05" in t and "at most ~$0.61" in t, "a bigger server costs more"
 
-# cost_text: shows the hourly rate and the maximum for the chosen hours
-assert "$0.018 per hour" in app.cost_text(12) and "about $0.22" in app.cost_text(12)
-assert "about $0.02 if it runs the full 1 h" in app.cost_text(1)
+# cost_text and sizes: hourly rate and session maximum per size; policy allows exactly the offered sizes
+assert "t3.micro, about $0.017 per hour" in app.cost_text(12) and "at most about $0.21" in app.cost_text(12)
+assert "at most about $0.02" in app.cost_text(1)
+assert "t3.small, about $0.028 per hour" in app.cost_text(12, "t3.small")
+assert app.hourly_usd("t3.medium") > app.hourly_usd("t3.small") > app.hourly_usd("t3.micro")
+assert app.hourly_usd("bogus") == app.hourly_usd("t3.micro")
+launch_rule = next(s for s in app.iam_policy("ap-south-1")["Statement"] if s["Sid"] == "LaunchOnlyTaggedSmallServers")
+assert launch_rule["Condition"]["StringEquals"]["ec2:InstanceType"] == list(app.SERVER_SIZES)
+assert all(not k.startswith(("t4g", "c7g", "m7g")) for k in app.SERVER_SIZES), "x86 only (x86 Shadowsocks build)"
+
+# settings: unknown size/theme fall back to defaults; theme choice resolves to light or dark
+d = tempfile.mkdtemp()
+sf = os.path.join(d, "settings.json")
+open(sf, "w").write(json.dumps({"size": "x9.huge", "theme": "neon"}))
+assert app.load_settings(sf)["size"] == "t3.micro" and app.load_settings(sf)["theme"] == "system"
+shutil.rmtree(d)
+assert app.resolve_theme("dark") == "dark" and app.resolve_theme("light") == "light"
+assert app.resolve_theme("system") in ("light", "dark")
+assert set(app.THEMES["light"]) == set(app.THEMES["dark"]), "both themes define every color"
 
 # auto-delete hours: clamped to 1..24, carried into the server script and read back from the tag
 assert [app.clamp_hours(x) for x in (0, 1, "5", 99, "junk", None)] == [1, 1, 5, 24, 12, 12]
@@ -276,9 +295,9 @@ class FakeAws:
     def instances(self): return [i for i in self.insts if i["InstanceId"] not in self.terminated]
     used = 0
     def month_usage(self, ledger): return self.used
-    def launch(self, pw, sg, subnet, hours=12, cap_bytes=0):
+    def launch(self, pw, sg, subnet, hours=12, cap_bytes=0, size="t3.micro"):
         self.launched.append("i-new")
-        self.launch_hours, self.launch_cap = hours, cap_bytes
+        self.launch_hours, self.launch_cap, self.launch_size = hours, cap_bytes, size
         self.insts.append({"InstanceId": "i-new", "State": {"Name": "pending"}, "LaunchTime": now})
         return "i-new"
     def wait_running(self, iid): return {"InstanceId": iid, "PublicIpAddress": "5.6.7.8", "LaunchTime": now}
@@ -297,7 +316,7 @@ def fake_app(aws):
     a.save_hours = lambda: None
     a.run = lambda job, steps, headline: job()  # synchronous, exceptions propagate
     app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
-                                           "allow_over": False}
+                                           "allow_over": False, "size": "t3.micro"}
     mem = {"instances": {}, "warned": {}}
     app.load_ledger = lambda path=None: json.loads(json.dumps(mem))
     app.save_ledger = lambda ledger, path=None: mem.update(ledger)
@@ -507,6 +526,7 @@ app.singbox_running = lambda: True
 aws.used = 40 * GB
 a.start()
 assert aws.launch_cap == app.CAP_BYTES - 40 * GB and "i-new" in a.ledger["instances"]
+assert aws.launch_size == "t3.micro", "the size chosen in Settings reaches the launch"
 app.singbox_running = lambda: False
 for used, words in ((None, "can't read"), (99.9 * GB, "used up")):
     aws = FakeAws(); a = fake_app(aws); aws.used = used
@@ -516,7 +536,7 @@ for used, words in ((None, "can't read"), (99.9 * GB, "used up")):
         assert words in str(e) and aws.launched == [], (words, str(e))
 aws = FakeAws(); a = fake_app(aws); aws.used = 99.9 * GB
 app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
-                                       "allow_over": True}
+                                       "allow_over": True, "size": "t3.micro"}
 app.singbox_running = lambda: True
 a.start()
 assert aws.launch_cap == 0, "going over allowed: no cap on the server"

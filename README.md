@@ -5,13 +5,13 @@ A one-click Windows app that runs your own private Shadowsocks proxy on **your o
 - **Start**: builds a fresh server, connects your laptop to it, and shows **"Successfully connected"** when all your traffic goes through it. Takes about 2–3 minutes.
 - **Stop**: disconnects, then deletes the server, its public IP and its disk, so nothing keeps billing.
 
-No SSH, no Linux commands. The app creates and remembers the proxy password for you. By default, using AWS also needs a 6-digit code from your phone, at most once an hour. Experienced users can turn that off.
+No SSH, no Linux commands. The app creates and remembers the proxy password for you, and keeps you inside AWS's free 100 GB of data a month unless you allow more.
 
 ---
 
 ## Quick Start
 
-Allow about 30 minutes the first time. After that it's one click and one phone code.
+Allow about 20 minutes the first time. After that it's one click.
 
 ### Step 1: Create an AWS account
 
@@ -26,93 +26,79 @@ Follow AWS's official guide: [Create an AWS account](https://docs.aws.amazon.com
 
 Follow [Creating a budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-create.html) and choose the **Monthly cost budget** template. Set a small amount such as USD 5 and your email address. AWS will email you if spending heads past it.
 
-### Step 3: Get the app
+### Step 3: Get the app (recommended: run from source)
 
-**Option A: download the app (no Python needed).**
-1. Open the [latest release](../../releases/latest) and download **`ProxyOnDemand.exe`** (and `ProxyOnDemand.exe.sha256` if you want to verify it).
-2. Optional: check the file is genuine. In PowerShell, run `Get-FileHash .\ProxyOnDemand.exe`, and compare the result with the value in the `.sha256` file.
-3. Put it anywhere, for example a `Proxy on demand` folder on your Desktop.
-
-> **Windows may warn about the app.** The `.exe` isn't code-signed yet, so Windows doesn't know the publisher.
-> - **"Windows protected your PC"** (SmartScreen): click **More info → Run anyway**.
-> - **"Smart App Control blocked an app"**: Windows 11's Smart App Control doesn't allow unsigned apps at all, and it shouldn't be turned off for this. Use Option B instead.
-
-**Option B: run from source.**
 1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/windows/). During setup, tick **"Add python.exe to PATH"**.
-2. On this page click **Code → Download ZIP**, and unzip it anywhere (or `git clone` it).
+2. On this page click **Code → Download ZIP**, and unzip it anywhere, for example a `Proxy on demand` folder on your Desktop (or `git clone` it).
+
+<details>
+<summary>Alternative: the ready-made <code>ProxyOnDemand.exe</code> (no Python, but Windows may block it)</summary>
+
+1. Open the [latest release](../../releases/latest) and download **`ProxyOnDemand.exe`**, plus `ProxyOnDemand.exe.sha256` if you want to verify it: in PowerShell run `Get-FileHash .\ProxyOnDemand.exe` and compare.
+2. The `.exe` isn't code-signed, so Windows doesn't know the publisher:
+   - **"Windows protected your PC"** (SmartScreen): click **More info → Run anyway**.
+   - **"Smart App Control blocked an app"**: Windows 11's Smart App Control doesn't allow unsigned apps at all, and it shouldn't be turned off for this. Run from source instead.
+
+</details>
 
 ### Step 4: Open the app
 
-1. **Option A:** double-click `ProxyOnDemand.exe`. **Option B:** double-click `Start Proxy App.bat`; the first run installs the one Python dependency.
+1. Double-click **`Start Proxy App.bat`** (or `ProxyOnDemand.exe`). The first run installs the one Python dependency.
 2. Accept the Windows admin prompt. The app needs admin rights to create its network adapter.
-3. The **AWS settings** window opens.
-   - **Require MFA (recommended)** is ticked. Keep it ticked and follow Steps 5–8, unless you are comfortable with AWS and prefer no phone codes; in that case untick it and follow [Setup without MFA](#setup-without-mfa) instead. You can change this later.
-   - **Region:** choose the AWS region nearest to you, for example `ap-south-1` (Mumbai), `eu-west-2` (London) or `us-east-1` (N. Virginia). See [all region codes](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html).
-   - Leave **Session Manager role** empty unless you want it (see [Advanced](#advanced)).
-4. Keep this window open. You'll come back to it.
+3. The **Settings** window opens on the **AWS access** tab. Choose the **Region** nearest to you, for example `ap-south-1` (Mumbai), `eu-west-2` (London) or `us-east-1` (N. Virginia). See [all region codes](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html). Keep the window open.
 
 ### Step 5: Create the app's IAM user
 
-With MFA on, this user can do nothing except ask for the app's role. Never use your root (email) login or an administrator key for this app.
+Never use your root (email) login or an administrator key for this app. Give it its own user that can only do what the app needs.
 
-1. In the app, click **Copy user policy**.
-2. In the AWS console, create a policy from it: follow [Creating policies with the JSON editor](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_create-console.html#access_policies_create-json-editor), paste, and name it `proxy-on-demand-key`.
+1. In the app, click **Copy IAM policy**. It copies the app's least-privilege permissions for your region.
+2. In the AWS console, create a policy from it: follow [Creating policies with the JSON editor](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_create-console.html#access_policies_create-json-editor), paste, and name it `proxy-on-demand-ec2`.
 3. Create a user: follow [Create an IAM user](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_users_create.html).
    - Name it `proxy-on-demand`.
    - **Do not** give it console access.
-   - On the permissions step, choose **Attach policies directly** → `proxy-on-demand-key`.
+   - On the permissions step, choose **Attach policies directly** → `proxy-on-demand-ec2`.
+4. Create an access key for it: follow [Managing access keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-keys-admin-managed.html). When asked for the use case, choose **Local code**.
 
-### Step 6: Add your phone as MFA, then create the access key
+### Step 6: Paste the key and save
 
-1. Open the `proxy-on-demand` user → **Security credentials** → **Assign MFA device** → **Authenticator app**. Follow [Assign a virtual MFA device](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa_enable_virtual.html) and scan the QR code with an authenticator app, such as Google Authenticator or Microsoft Authenticator.
-2. On the same page, create an access key: follow [Managing access keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-keys-admin-managed.html). When asked for the use case, choose **Local code**.
-3. Paste the **Access key ID** and **Secret access key** into the app's AWS settings window. Don't click Save yet.
-
-### Step 7: Create the app's role (this holds the real permissions)
-
-1. In the app, click **Copy role permissions**. In the AWS console, create a policy from it ([JSON editor](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_create-console.html#access_policies_create-json-editor)) named `proxy-on-demand-ec2`.
-2. In the app, click **Copy role trust policy**. This policy names your `proxy-on-demand` user and requires MFA.
-3. In the AWS console, create the role: follow [Create a role using a custom trust policy](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-custom.html).
-   - Paste the trust policy.
-   - Attach `proxy-on-demand-ec2`.
-   - Name the role exactly `proxy-on-demand-role`.
-
-### Step 8: Save and sign in
-
-In the app, click **Save and sign in**, then enter the 6-digit code from your authenticator app. If the status line says **"No server (not billing)"**, everything is set up correctly.
-
-The app checks the key with AWS before saving:
-- It refuses root keys, keys that AWS doesn't accept, and users without MFA.
+Paste the **Access key ID** and **Secret access key** into the app and click **Save**. The app checks the key with AWS first:
+- It refuses root keys and keys AWS doesn't accept.
 - It warns you about admin keys.
 
-### Setup without MFA
+If the status line then says **"Not connected"** with "nothing is billing", everything works.
 
-This replaces Steps 5–8. It's simpler: one user, one policy, no role and no phone codes. The trade-off is in the [Security model](#security-model).
-
-1. In AWS settings, untick **Require MFA**, choose your region, and click **Copy user policy**. With MFA off, this copies the app's least-privilege EC2 permissions.
-2. In the AWS console, create a policy from it ([JSON editor](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_create-console.html#access_policies_create-json-editor)) named `proxy-on-demand-ec2`.
-3. [Create an IAM user](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_users_create.html):
-   - Name it `proxy-on-demand`.
-   - **Do not** give it console access.
-   - Choose **Attach policies directly** → `proxy-on-demand-ec2`.
-4. [Create an access key](https://docs.aws.amazon.com/IAM/latest/UserGuide/access-keys-admin-managed.html) for it (use case **Local code**), paste both values into the app, and click **Save and sign in**. If the status line says **"No server (not billing)"**, the setup works.
-
-### Step 9: Add the kill switch (recommended, 5 minutes)
+### Step 7: Add the kill switch (recommended, 5 minutes)
 
 Make AWS lock the app out automatically if spending ever passes your limit:
 1. Open the budget from Step 2 and add a **budget action**: follow [Configuring a budget action](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-action-configure.html).
-2. Choose **IAM policy** as the action, with the AWS-managed policy [`AWSDenyAll`](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AWSDenyAll.html), and set it to run **automatically**.
-   - **Target:** the role `proxy-on-demand-role` (with MFA), or the user `proxy-on-demand` (without MFA).
+2. Choose **IAM policy** as the action, with the AWS-managed policy [`AWSDenyAll`](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AWSDenyAll.html).
+   - **Target:** the user `proxy-on-demand`, or the role `proxy-on-demand-role` if you use MFA.
+   - Set it to run **automatically**.
 
 Also turn on [Cost Anomaly Detection](https://docs.aws.amazon.com/cost-management/latest/userguide/getting-started-ad.html). It's free and emails you about unusual spending.
 
-### Step 10: Press Start
+### Step 8: Press Start
 
-Choose how long the server may live (see [Auto-delete](#auto-delete-and-cost)), then press **Start**. A progress bar shows each step and the time left. A fresh server usually takes **about 1–2 minutes**.
+Press **Start**. A progress bar shows each step and the time left. A fresh server usually takes **about 1–2 minutes**.
 
 On the first Start the app also downloads sing-box, the VPN engine. It's the official release, and the app checks it against a pinned checksum. When you see **"Successfully connected"**, all your traffic goes through your server.
 
 **Press Stop when you're done.** The app confirms that nothing is left billing.
+
+Everything else (server size, auto-delete time, the data limit, MFA, theme) has sensible defaults. You can change any of it under **Settings**. See [Settings](#settings).
+
+### Extra security with MFA (optional)
+
+With MFA, the stored key alone can do nothing: every sign-in also needs a 6-digit code from your phone, and AWS access lasts 1 hour, in memory only. It takes about 10 more minutes to set up. See the [Security model](#security-model) for the trade-off.
+
+1. **Turn it on.** In the app open **Settings → Security** and tick **Require a code from my phone (MFA)**.
+2. **Change the user's policy.** On the **AWS access** tab click **Copy IAM policy**. With MFA on, it copies a tiny policy that can only ask for the app's role. Create it as `proxy-on-demand-key`, attach it to the `proxy-on-demand` user, and detach `proxy-on-demand-ec2` from the user.
+3. **Add your phone.** Open the user → **Security credentials** → **Assign MFA device** → **Authenticator app**, and follow [Assign a virtual MFA device](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_mfa_enable_virtual.html).
+4. **Create the role.**
+   - On the Security tab, click **Copy role permissions** and make sure `proxy-on-demand-ec2` contains it.
+   - Click **Copy role trust policy**. It names your user and requires MFA.
+   - [Create a role with a custom trust policy](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_create_for-custom.html): paste the trust policy, attach `proxy-on-demand-ec2`, and name the role exactly `proxy-on-demand-role`.
+5. **Save,** and enter the code from your authenticator app.
 
 ---
 
@@ -128,11 +114,27 @@ On the first Start the app also downloads sing-box, the VPN engine. It's the off
 | **Start / Reconnect** | Start creates a server and connects you. While a server exists the button reads **Reconnect** (see below). |
 | **Stop** | Disconnects you first, so your normal internet returns, then deletes the server and checks that nothing is left billing. |
 | **Refresh** | Re-checks AWS and the connection. |
-| **AWS settings** | MFA, region and access key (Quick Start Steps 4–8). |
+| **Settings** | Access key and region on the first tab; server size, auto-delete time, data limit, MFA and theme on the others. See [Settings](#settings). |
 | **Logs** | Opens the folder that holds `app.log`. |
 | **Show activity** | Unfolds a log of everything the app does, step by step. The same text is saved in `app.log`. |
 
-The window sizes itself from your screen's scaling setting, so it looks the same on a 1080p laptop, a 1440p screen or a 4K display.
+The window sizes itself from your screen's scaling setting, so it looks the same on a 1080p laptop, a 1440p screen or a 4K display. Below the buttons, one line says what the next session costs at most; **Change in Settings** opens the options.
+
+### Settings
+
+| Tab | What's there |
+|---|---|
+| **AWS access** | Access key, region, and **Copy IAM policy**. All a beginner needs. |
+| **Server & data** | **Size**: Small (`t3.micro`, default), Medium (`t3.small`) or Large (`t3.medium`, for more people at once), with a live estimate of the hourly and per-session cost. **Delete after** 1–24 hours. **Allow going over the free 100 GB** of data a month. |
+| **Security** | Optional MFA, and an optional Session Manager role. |
+| **Appearance** | Theme: same as Windows, Light or Dark. Applies the next time you open the app. |
+
+Approximate prices, Mumbai, for server + public IP + disk:
+- Small: about $0.017/h
+- Medium: about $0.028/h
+- Large: about $0.051/h
+
+Other regions differ a little. Data beyond the free 100 GB is extra. The size and auto-delete time apply to the next server you start.
 
 ### Monthly data limit (free 100 GB)
 
@@ -151,7 +153,7 @@ AWS gives every account **100 GB of outbound data per month free**; beyond that,
   - While a server runs, the window updates every **15 minutes**, and every **5 minutes** once less than 10 GB is left. AWS's traffic figures (CloudWatch) only update every 5 minutes, so checking more often would show nothing new.
   - The stop at the limit doesn't depend on this: the server does it within seconds.
   - **Refresh** updates immediately.
-- **Going over on purpose:** tick **"Allow going over the free 100 GB of data a month"** in AWS settings. Servers then have no data limit and keep running until Stop or auto-delete. The warnings still appear, and data beyond 100 GB is billed.
+- **Going over on purpose:** tick **"Allow going over the free 100 GB of data a month"** in **Settings → Server & data**. Servers then have no data limit and keep running until Stop or auto-delete. The warnings still appear, and data beyond 100 GB is billed.
 
 What it counts:
 - Data sent by the app's servers this calendar month (UTC), including servers that already deleted themselves.
@@ -163,7 +165,7 @@ What it counts:
 
 Version 1.1.0 needs one extra, read-only permission, `cloudwatch:GetMetricStatistics`, to measure data. Until you add it, the app shows "Data this month: unknown" and refuses to start a capped server.
 
-1. In the app open **AWS settings** and click **Copy role permissions** (with MFA) or **Copy user policy** (without MFA).
+1. In the app open **Settings** and click **Copy IAM policy** on the AWS access tab (with MFA: **Copy role permissions** on the Security tab).
 2. In the AWS console go to IAM → Policies → `proxy-on-demand-ec2` → **Edit** → JSON, replace everything with the copied text, and save.
 
 ### Switching networks: Reconnect
@@ -223,7 +225,7 @@ The goal: even if your laptop is fully compromised, stealing what's on it gets a
 | The stored key file | Encrypted with Windows DPAPI for your Windows account (`%USERPROFILE%\.proxy-on-demand\aws-key.bin`). Unreadable from a stolen disk, a backup or cloud sync. Never in the app folder or in plain text. | Same. |
 | AWS access while the app runs | Temporary 1-hour credentials, kept **only in memory**. Closing the app ends them. | The key itself, in memory. |
 | What a stolen credential can do | Only start and delete small, tagged `t3.micro` servers from Amazon images, in your one region. Nothing else in your account; no IAM rights. | Same limits. |
-| The bill | Servers delete themselves at the time you choose (1–24 h). The budget kill switch (Step 9) locks access automatically, and Cost Anomaly Detection emails you. | Same. |
+| The bill | Servers delete themselves at the time you choose (1–24 h). The budget kill switch (Step 7) locks access automatically, and Cost Anomaly Detection emails you. | Same. |
 
 **The difference in one line:** without MFA, anyone who gets the key, for example malware on your laptop, can use it until you delete it. With MFA, they would also need your phone, or would have to strike during a one-hour session you opened.
 
@@ -231,7 +233,7 @@ The goal: even if your laptop is fully compromised, stealing what's on it gets a
 
 **Lost your phone?** Sign in to the AWS console with your root or admin login, remove the old MFA device from the `proxy-on-demand` user, and assign a new one.
 
-**Key leaked?** Delete it in IAM → `proxy-on-demand` user → Security credentials, create a new one, and enter it in AWS settings.
+**Key leaked?** Delete it in IAM → `proxy-on-demand` user → Security credentials, create a new one, and enter it in Settings.
 
 ## What Start does
 
@@ -271,13 +273,13 @@ After Stop: nothing. The app's security group, IAM user and role are free.
 
 | Symptom | Fix |
 |---|---|
-| AWS settings opens on every launch | No key is saved yet. Do Steps 5–8. |
-| "has no MFA device" | Do Step 6.1, or untick **Require MFA** and use [Setup without MFA](#setup-without-mfa). |
+| Settings opens on every launch | No key is saved yet. Do Steps 5–6. |
+| "has no MFA device" | Add one (step 3 of [Extra security with MFA](#extra-security-with-mfa-optional)), or untick MFA in Settings → Security. |
 | "cannot look up its MFA device" | The user policy isn't attached to the user (Step 5). |
-| "MFA is turned on, but the saved key was set up without it" | Open AWS settings and click Save again. |
+| "MFA is turned on, but the saved key was set up without it" | Open Settings and click Save again. |
 | "This key cannot use EC2" (without MFA) | Attach `proxy-on-demand-ec2` to the user, and check that the policy is for the region set in the app. |
 | "AWS refused the sign-in" | Wait for the next code and try again. If it keeps failing, check that the role is named exactly `proxy-on-demand-role` and uses the trust policy copied from the app (Step 7). |
-| "UnauthorizedOperation" on Start | The role's permissions policy is for a different region than the one set in the app. Copy role permissions again and update `proxy-on-demand-ec2`. |
+| "UnauthorizedOperation" on Start | The `proxy-on-demand-ec2` policy is for a different region, or from an older version (before server sizes). Click **Copy IAM policy** (or **Copy role permissions** with MFA) and replace the policy's JSON. |
 | "No default VPC" | Follow [Default VPCs](https://docs.aws.amazon.com/vpc/latest/userguide/work-with-default-vpc.html) to create one. |
 | "did not open in 5 min" | Usually your network uses a public IP the app couldn't detect, or it blocks this traffic. Try again, or try another network such as a phone hotspot. To check the server itself, set `KEEP_FAILED_SERVER = True`, then in the EC2 console open the instance → Actions → Monitor and troubleshoot → Get system log, and look for `SS-SETUP-DONE`. |
 | Can't find the log | Click **Logs** in the app. It opens `%USERPROFILE%\.proxy-on-demand`. |
@@ -287,7 +289,7 @@ After Stop: nothing. The app's security group, IAM user and role are free.
 | "Traffic left via …" | Another VPN is active. Turn it off and press Start. |
 | Works on one network but not another | Some networks block this kind of traffic even on port 443. |
 | "Data this month: unknown" or "can't read this month's data usage" | Update your IAM policy (see [Updating your IAM policy](#updating-your-iam-policy-when-upgrading-from-100)). |
-| "free 100 GB of data is used up" | The limit for this month is reached. Wait for the 1st (UTC), or allow going over in AWS settings. |
+| "free 100 GB of data is used up" | The limit for this month is reached. Wait for the 1st (UTC), or allow going over in Settings → Server & data. |
 
 ## Files on your laptop
 
@@ -306,7 +308,7 @@ The folder is deliberately not under `AppData`. The Microsoft Store version of P
 
 ## Advanced
 
-- **Session Manager (shell access to the server):** create an EC2 role with the `AmazonSSMManagedInstanceCore` policy ([guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-instance-permissions.html)) and enter its name in AWS settings. Then click **Copy role permissions** again and update `proxy-on-demand-ec2`: the copied policy now also allows passing that one role.
+- **Session Manager (shell access to the server):** create an EC2 role with the `AmazonSSMManagedInstanceCore` policy ([guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/setup-instance-permissions.html)) and enter its name in Settings → Security. Then click **Copy IAM policy** (or **Copy role permissions** with MFA) again and update `proxy-on-demand-ec2`: the copied policy now also allows passing that one role.
 - **Keep a failed server for debugging:** set `KEEP_FAILED_SERVER = True` in `proxy_app.py`. It then bills until you press Stop.
 - **Auto-delete time:** set on the main window (1–24 h). The upper limit is `MAX_HOURS_LIMIT` in `proxy_app.py`.
 
@@ -395,7 +397,7 @@ Windows releases are built from this repository's source by [GitHub Actions](.gi
 - **Approvers:** [ShRike3601](https://github.com/ShRike3601). Each release is approved manually.
 - **Privacy:** see [Privacy policy](#privacy-policy). This program won't transfer any information to other networked systems unless the user or the person running it specifically requests it, except for the services listed there.
 
-*Releases are not code-signed yet. Free code signing for open-source projects is being requested from [SignPath Foundation](https://signpath.org).*
+*Releases are not code-signed yet. The project applied to [SignPath Foundation](https://signpath.org)'s free open-source signing, which requires a more established project; it will reapply as the project grows. Until then, running from source (Quick Start Step 3) avoids Windows' warnings.*
 
 ## License
 

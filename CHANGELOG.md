@@ -2,6 +2,14 @@
 
 All notable changes to this project. Versions follow [Semantic Versioning](https://semver.org/). Each version's section here becomes its GitHub Release notes.
 
+## 1.2.0
+
+- **Simpler by default.** MFA is now an opt-in extra (Settings → Security). The Quick Start leads with the quickest path: run from source, one IAM user, one policy.
+- **Settings window with tabs.** "AWS access" holds only the key, the region and Copy IAM policy. Optional things live in "Server & data", "Security" and "Appearance". The main window shows one line about the next session, with a "Change in Settings" link.
+- **Server size.** Choose Small (`t3.micro`), Medium (`t3.small`) or Large (`t3.medium`), with a live cost estimate. Costs shown everywhere now follow the size actually running.
+- **Dark mode.** Theme: same as Windows, Light or Dark, including a dark title bar.
+- **Action needed for existing users:** the IAM policy now allows the three sizes. Copy it again (Settings → Copy IAM policy, or Copy role permissions with MFA) and replace `proxy-on-demand-ec2`'s JSON, or larger sizes will be refused.
+
 ## 1.1.0
 
 - **Free-data cap (on by default).** Each server stops itself, which deletes it, when this month's data reaches 99.99 GB, just under AWS's free 100 GB.

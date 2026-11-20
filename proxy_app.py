@@ -31,13 +31,21 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 REPO = "ShRike3601/proxy-on-demand"  # GitHub repo, for the "new version available" notice
 ROLE_NAME = "proxy-on-demand-role"  # IAM role holding the app's EC2 permissions; assumable only with MFA
 SESSION_SECONDS = 3600              # temporary credentials last 1 hour, in memory only
 OLD_PROFILE = "proxy-on-demand"     # plain-text profile used by earlier versions; removed on first save
 APP_TAG = "ss-proxy-app"          # every resource we create is tagged app=ss-proxy-app
-INSTANCE_TYPE = "t3.micro"
+# Server sizes offered in Settings > Advanced. x86 only: the server installs the x86_64 Shadowsocks build.
+# Prices: on-demand Linux, Mumbai (ap-south-1), approximate; other regions differ a little.
+SERVER_SIZES = {
+    "t3.micro": (0.0112, "Small: 1 GB memory. Plenty for 1-3 people (default)"),
+    "t3.small": (0.0224, "Medium: 2 GB memory, about twice Small's steady network share. A few people"),
+    "t3.medium": (0.0448, "Large: 4 GB memory, about four times Small's steady network share. A small group"),
+}
+INSTANCE_TYPE = "t3.micro"  # default size
+EXTRA_USD = 0.006  # per hour on top of the server: public IPv4 address ($0.005) + 8 GB disk
 PORT = 443
 METHOD = "2022-blake3-aes-128-gcm"
 SS_VERSION = "1.25.0"
@@ -51,8 +59,9 @@ OLD_APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "proxy-on-demand"
 APP_LOG = os.path.join(APP_DIR, "app.log")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 USAGE_FILE = os.path.join(APP_DIR, "usage.json")  # this month's servers, for the data allowance
-DEFAULT_SETTINGS = {"mfa": True, "region": "ap-south-1", "ssm_role": "",  # MFA on unless the user opts out
-                    "max_hours": 12, "allow_over": False}  # allow_over: let data go past the free 100 GB
+DEFAULT_SETTINGS = {"mfa": False, "region": "ap-south-1", "ssm_role": "",  # MFA: opt-in extra security
+                    "max_hours": 12, "allow_over": False,  # allow_over: let data go past the free 100 GB
+                    "size": "t3.micro", "theme": "system"}
 KEY_FILE = os.path.join(APP_DIR, "aws-key.bin")  # DPAPI-encrypted, readable only by this Windows user
 DPAPI_ENTROPY = b"proxy-on-demand/aws-key/v1"
 PLAINTEXT_CRED_FILE = os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or \
@@ -65,7 +74,6 @@ SB_ZIP_SHA256 = "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991d
 WARP_CLI = r"C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe"
 MAX_HOURS = 12                    # default auto-delete time; users pick 1..MAX_HOURS_LIMIT on the main window
 MAX_HOURS_LIMIT = 24
-HOURLY_USD = 0.018                # t3.micro + public IPv4 + 8 GB disk (ap-south-1), excluding data transfer
 KEEP_FAILED_SERVER = False        # True keeps a server whose Start failed (for debugging); it then bills until Stop
 NO_WINDOW = 0x08000000
 
@@ -193,6 +201,10 @@ def load_settings(path=SETTINGS_FILE):
         saved = {}
     s = {**DEFAULT_SETTINGS, **{k: v for k, v in saved.items() if k in DEFAULT_SETTINGS}}
     s["max_hours"] = clamp_hours(s["max_hours"])
+    if s["size"] not in SERVER_SIZES:
+        s["size"] = INSTANCE_TYPE
+    if s["theme"] not in ("system", "light", "dark"):
+        s["theme"] = "system"
     return s
 
 
@@ -378,9 +390,9 @@ def iam_policy(region, ssm_role=""):
                     "ec2:DescribeSecurityGroups", "ec2:CreateSecurityGroup",
                     "cloudwatch:GetMetricStatistics"],  # read-only: how much data the app's servers sent
          "Resource": "*", "Condition": {"StringEquals": {"aws:RequestedRegion": region}}},
-        {"Sid": "LaunchOnlyTaggedT3Micro", "Effect": "Allow", "Action": "ec2:RunInstances",
+        {"Sid": "LaunchOnlyTaggedSmallServers", "Effect": "Allow", "Action": "ec2:RunInstances",
          "Resource": ec2 + "instance/*",
-         "Condition": {"StringEquals": {"ec2:InstanceType": INSTANCE_TYPE, "aws:RequestTag/app": APP_TAG}}},
+         "Condition": {"StringEquals": {"ec2:InstanceType": list(SERVER_SIZES), "aws:RequestTag/app": APP_TAG}}},
         {"Sid": "LaunchOnlyAmazonImages", "Effect": "Allow", "Action": "ec2:RunInstances",
          "Resource": f"arn:aws:ec2:{region}::image/*", "Condition": {"StringEquals": {"ec2:Owner": "amazon"}}},
         {"Sid": "LaunchSupportingResources", "Effect": "Allow", "Action": "ec2:RunInstances",
@@ -612,13 +624,13 @@ class Aws:
             for p in ("tcp", "udp")])
         self.log(f"Inbound {PORT} now allowed only from your network: {', '.join(ips)}")
 
-    def launch(self, password, sg, subnet, max_hours=MAX_HOURS, cap_bytes=0):
+    def launch(self, password, sg, subnet, max_hours=MAX_HOURS, cap_bytes=0, size=INSTANCE_TYPE):
         ami = self.ssm.get_parameter(Name=AMI_PARAM)["Parameter"]["Value"]
         max_hours = clamp_hours(max_hours)
         tags = [{"Key": "Name", "Value": "ss-proxy"}, {"Key": "app", "Value": APP_TAG},
                 {"Key": "auto-delete-hours", "Value": str(max_hours)}]  # read back for the countdown
         args = dict(
-            ImageId=ami, InstanceType=INSTANCE_TYPE, MinCount=1, MaxCount=1,
+            ImageId=ami, InstanceType=size if size in SERVER_SIZES else INSTANCE_TYPE, MinCount=1, MaxCount=1,
             UserData=user_data(password, max_hours, cap_bytes),
             InstanceInitiatedShutdownBehavior="terminate",   # a shutdown from inside also stops billing
             MetadataOptions={"HttpTokens": "required"},
@@ -627,7 +639,7 @@ class Aws:
             TagSpecifications=[{"ResourceType": t, "Tags": tags} for t in ("instance", "volume")])
         if self.ssm_role:  # optional: lets you open a shell with Session Manager
             args["IamInstanceProfile"] = {"Name": self.ssm_role}
-        self.log(f"Launching {INSTANCE_TYPE} in {self.region}")
+        self.log(f"Launching {args['InstanceType']} in {self.region}")
         iid = self.ec2.run_instances(**args)["Instances"][0]["InstanceId"]
         self.log(f"Instance {iid} starting")
         return iid  # returned before waiting, so the caller can clean up if anything after this fails
@@ -732,20 +744,26 @@ def money(usd):
     return f"${usd:.2f}" if usd >= 0.01 else "less than $0.01"
 
 
-def cost_text(max_hours):
-    """What a session costs, before you start it."""
-    return (f"Applies to the next server you start. A server costs about ${HOURLY_USD:.3f} per hour, so at "
-            f"most about {money(max_hours * HOURLY_USD)} if it runs the full {max_hours} h. "
-            "Downloads beyond 100 GB a month cost extra.")
+def hourly_usd(size=INSTANCE_TYPE):
+    """Server + public IP + disk, per hour (approximate, Mumbai prices; data transfer not included)."""
+    return SERVER_SIZES.get(size, SERVER_SIZES[INSTANCE_TYPE])[0] + EXTRA_USD
 
 
-def uptime_text(launch_time, max_hours=MAX_HOURS, now=None):
+def cost_text(max_hours, size=INSTANCE_TYPE):
+    """One plain line: what the next session costs at most."""
+    rate = hourly_usd(size)
+    return (f"Next server: {size}, about ${rate:.3f} per hour. It deletes itself after {max_hours} h, so a session "
+            f"costs at most about {money(max_hours * rate)}. Data is free up to 100 GB a month.")
+
+
+def uptime_text(launch_time, max_hours=MAX_HOURS, now=None, size=INSTANCE_TYPE):
     """'Running 1h05m · cost so far ~$0.02 (at most ~$0.22) · auto-deletes in 10h55m'."""
     h = ((now or datetime.now(timezone.utc)) - launch_time).total_seconds() / 3600
     left = max(0.0, max_hours - h)
     fmt = lambda x: f"{int(x)}h{int(x * 60) % 60:02d}m"
-    return (f"Running {fmt(h)} · cost so far ~{money(h * HOURLY_USD)} "
-            f"(at most ~{money(max_hours * HOURLY_USD)}) · auto-deletes in {fmt(left)}")
+    rate = hourly_usd(size)
+    return (f"Running {fmt(h)} · cost so far ~{money(h * rate)} "
+            f"(at most ~{money(max_hours * rate)}) · auto-deletes in {fmt(left)}")
 
 
 def wait_port(ip, log, recheck=lambda: None, timeout=300):
@@ -781,8 +799,45 @@ STOP_STEPS = [("disconnect", "Disconnecting", 3), ("signin", "Signing in to AWS"
               ("delete", "Deleting the server and checking nothing is left", 40)]
 REFRESH_STEPS = [("signin", "Signing in to AWS", 3), ("check", "Checking for running servers", 3)]
 COLORS = {"idle": "#9aa0a6", "busy": "#f29900", "ok": "#188038", "warn": "#e8710a", "error": "#d93025"}
-THEME = {"bg": "#f3f4f6", "card": "#ffffff", "line": "#e1e3e8", "text": "#1f2328", "muted": "#5f6368",
-         "accent": "#1a73e8", "accent_hover": "#1765cc", "accent_off": "#a8c7fa"}
+REGIONS = ["ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "eu-west-1", "eu-west-2",
+           "eu-central-1", "eu-north-1", "us-east-1", "us-east-2", "us-west-2", "ca-central-1", "sa-east-1",
+           "me-central-1", "af-south-1"]  # common choices; any valid region code can be typed in
+THEMES = {
+    "light": {"bg": "#f3f4f6", "card": "#ffffff", "line": "#e1e3e8", "text": "#1f2328", "muted": "#5f6368",
+              "field": "#ffffff", "hover": "#eceef1", "trough": "#e8eaed", "disabled": "#9aa0a6",
+              "accent": "#1a73e8", "accent_hover": "#1765cc", "accent_off": "#a8c7fa", "accent_text": "#ffffff"},
+    "dark": {"bg": "#18191c", "card": "#232428", "line": "#34363c", "text": "#e8eaed", "muted": "#a0a4ab",
+             "field": "#2c2e33", "hover": "#2f3136", "trough": "#34363c", "disabled": "#6b6f76",
+             "accent": "#5b9bf8", "accent_hover": "#76acfa", "accent_off": "#2c4268", "accent_text": "#0b1220"},
+}
+THEME = dict(THEMES["light"])  # filled in by style_app() from the user's choice
+
+
+def windows_uses_dark():
+    """Windows' 'app mode' setting (Settings > Personalization > Colors)."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return winreg.QueryValueEx(k, "AppsUseLightTheme")[0] == 0
+    except OSError:
+        return False
+
+
+def resolve_theme(choice):
+    return ("dark" if windows_uses_dark() else "light") if choice == "system" else choice
+
+
+def dark_title_bar(window):
+    """Match the window's title bar to a dark theme (Windows 10 2004+ / 11; silently skipped elsewhere)."""
+    if THEME.get("name") == "dark":
+        try:
+            window.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+            on = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))
+        except (AttributeError, OSError):
+            pass
 
 
 def scaler(root):
@@ -792,14 +847,19 @@ def scaler(root):
     return lambda n: max(1, round(n * k))
 
 
-def style_app(root, px):
-    """One flat light theme built on Tk's own 'clam' (no extra library in the exe)."""
+def style_app(root, px, theme="system"):
+    """Flat light or dark theme built on Tk's own 'clam' (no extra library in the exe)."""
+    name = resolve_theme(theme)
+    THEME.clear()
+    THEME.update(THEMES[name], name=name)
     t = THEME
     root.configure(bg=t["bg"])
-    for name in ("TkDefaultFont", "TkTextFont"):  # not option_add("*Font"): that would override ttk style fonts
-        tkfont.nametofont(name).configure(family="Segoe UI", size=11)
-    for pattern, value in (("*Background", t["bg"]), ("*Entry.Background", "white"), ("*Foreground", t["text"])):
-        root.option_add(pattern, value)  # also styles the AWS settings dialog
+    for font_name in ("TkDefaultFont", "TkTextFont"):  # not option_add("*Font"): that would override ttk fonts
+        tkfont.nametofont(font_name).configure(family="Segoe UI", size=11)
+    for pattern, value in (("*Background", t["bg"]), ("*Foreground", t["text"]), ("*insertBackground", t["text"]),
+                           ("*TCombobox*Listbox.background", t["field"]),
+                           ("*TCombobox*Listbox.foreground", t["text"])):
+        root.option_add(pattern, value)  # also reaches dialogs and drop-down lists
     s = ttk.Style(root)
     s.theme_use("clam")
     s.configure(".", background=t["bg"], foreground=t["text"], font=("Segoe UI", 11), bordercolor=t["line"],
@@ -810,15 +870,32 @@ def style_app(root, px):
     s.configure("Head.Card.TLabel", background=t["card"], font=("Segoe UI", 16, "bold"))
     s.configure("Title.Card.TLabel", background=t["card"], font=("Segoe UI", 11, "bold"))
     s.configure("TButton", background=t["card"], padding=(px(16), px(8)), relief="flat")
-    s.map("TButton", background=[("disabled", t["bg"]), ("active", "#eceef1")],
-          foreground=[("disabled", "#9aa0a6")])
-    s.configure("Accent.TButton", background=t["accent"], foreground="white", bordercolor=t["accent"],
+    s.map("TButton", background=[("disabled", t["bg"]), ("active", t["hover"])],
+          foreground=[("disabled", t["disabled"])])
+    s.configure("Accent.TButton", background=t["accent"], foreground=t["accent_text"], bordercolor=t["accent"],
                 lightcolor=t["accent"], darkcolor=t["accent"], font=("Segoe UI", 11, "bold"), padding=(px(26), px(8)))
     s.map("Accent.TButton", background=[("disabled", t["accent_off"]), ("active", t["accent_hover"])],
-          foreground=[("disabled", "white")])
-    s.configure("Horizontal.TProgressbar", background=t["accent"], troughcolor="#e8eaed", bordercolor="#e8eaed",
+          foreground=[("disabled", t["accent_text"])])
+    s.configure("Horizontal.TProgressbar", background=t["accent"], troughcolor=t["trough"], bordercolor=t["trough"],
                 lightcolor=t["accent"], darkcolor=t["accent"], thickness=px(10))
-    s.configure("TSpinbox", fieldbackground="white", arrowsize=px(11), padding=px(3))
+    for field in ("TSpinbox", "TEntry", "TCombobox"):
+        s.configure(field, fieldbackground=t["field"], foreground=t["text"], arrowcolor=t["text"],
+                    arrowsize=px(11), padding=px(4), insertcolor=t["text"])
+        s.map(field, fieldbackground=[("readonly", t["field"])], foreground=[("readonly", t["text"])],
+              selectbackground=[("readonly", t["field"])], selectforeground=[("readonly", t["text"])])
+    s.configure("Card.TCheckbutton", background=t["card"], indicatorbackground=t["field"],
+                indicatorforeground=t["text"])
+    s.map("Card.TCheckbutton", background=[("active", t["card"])],
+          indicatorbackground=[("selected", t["accent"]), ("active", t["field"])],
+          indicatorforeground=[("selected", t["accent_text"])])
+    s.configure("TNotebook", background=t["bg"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+    s.configure("TNotebook.Tab", background=t["bg"], foreground=t["muted"], padding=(px(14), px(7)),
+                bordercolor=t["line"], lightcolor=t["bg"])
+    s.map("TNotebook.Tab", background=[("selected", t["card"])], foreground=[("selected", t["text"])],
+          lightcolor=[("selected", t["card"])])
+    s.configure("Link.TButton", background=t["card"], foreground=t["accent"], relief="flat", borderwidth=0,
+                padding=(0, 0), focuscolor=t["card"])
+    s.map("Link.TButton", background=[("active", t["card"])], foreground=[("active", t["accent_hover"])])
 
 
 def card(parent, px):
@@ -862,7 +939,8 @@ class App:
 
         root.title(f"Proxy on demand {__version__}")
         px = self.px = scaler(root)  # every size below is in "100 % scaling" pixels, scaled to this screen
-        style_app(root, px)
+        style_app(root, px, load_settings()["theme"])
+        dark_title_bar(root)
 
         outer = ttk.Frame(root, padding=px(22))
         outer.pack(fill="both", expand=True)
@@ -890,36 +968,27 @@ class App:
         self.stop_btn = ttk.Button(self.controls, text="Stop", command=self.stop)
         self.buttons = [self.start_btn, self.stop_btn,
                         ttk.Button(self.controls, text="Refresh", command=self.refresh),
-                        ttk.Button(self.controls, text="AWS settings", command=self.settings_dialog)]
+                        ttk.Button(self.controls, text="Settings", command=self.settings_dialog)]
         for b in self.buttons:
             b.pack(side="left", padx=(0, px(8)))
         self.activity_btn = ttk.Button(self.controls, text="Show activity", command=self.toggle_activity)
         self.activity_btn.pack(side="right")
         ttk.Button(self.controls, text="Logs", command=lambda: os.startfile(APP_DIR)).pack(side="right", padx=px(8))
 
-        # server lifetime and cost, chosen before Start
-        life = card(outer, px)
-        life.pack(fill="x")
-        ttk.Label(life, text="Server lifetime", style="Title.Card.TLabel").pack(anchor="w")
-        row = ttk.Frame(life, style="Card.TFrame")
-        row.pack(fill="x", pady=(px(8), 0))
-        ttk.Label(row, text="Delete the server automatically after", style="Card.TLabel").pack(side="left")
-        self.hours = tk.StringVar(value=str(load_settings()["max_hours"]))
-        spin = ttk.Spinbox(row, from_=1, to=MAX_HOURS_LIMIT, width=4, textvariable=self.hours,
-                           command=self.save_hours, justify="center")
-        spin.pack(side="left", padx=px(8))
-        spin.bind("<FocusOut>", lambda e: self.save_hours())
-        spin.bind("<Return>", lambda e: self.save_hours())
-        ttk.Label(row, text="hours, even if you never press Stop.", style="Card.TLabel").pack(side="left")
-        self.cost = tk.StringVar(value=cost_text(clamp_hours(self.hours.get())))
-        ttk.Label(life, textvariable=self.cost, style="Muted.Card.TLabel", wraplength=px(680),
-                  justify="left").pack(anchor="w", pady=(px(8), 0))
-        self.hours.trace_add("write", lambda *a: self.cost.set(cost_text(clamp_hours(self.hours.get()))))
+        # the next session in one plain line; everything optional lives in Settings > Advanced
+        plan = card(outer, px)
+        plan.pack(fill="x")
+        self.cost = tk.StringVar()
+        ttk.Label(plan, textvariable=self.cost, style="Muted.Card.TLabel", wraplength=px(640),
+                  justify="left").pack(side="left", fill="x", expand=True)
+        ttk.Button(plan, text="Change in Settings", style="Link.TButton",
+                   command=lambda: self.settings_dialog(advanced=True)).pack(side="right", anchor="n")
+        self.update_cost()
 
         # activity log, folded away until asked for
         self.activity = card(outer, px)
         self.out = scrolledtext.ScrolledText(self.activity, height=9, font=("Consolas", 10), state="disabled",
-                                             relief="flat", borderwidth=0, bg=THEME["card"])
+                                             relief="flat", borderwidth=0, bg=THEME["card"], fg=THEME["text"])
         self.out.pack(fill="both", expand=True)
         fit_to_screen(root, px)
 
@@ -947,12 +1016,11 @@ class App:
             self.activity_btn.config(text="Hide activity")
         self.root.geometry("")  # let the window grow or shrink to its content
 
-    def save_hours(self):
-        hours = clamp_hours(self.hours.get())
-        self.hours.set(str(hours))
-        if hours != load_settings()["max_hours"]:
-            save_settings({"max_hours": hours})
-            self.log(f"New servers will delete themselves after {hours} h")
+    def update_cost(self):
+        s = load_settings()
+        cap = ("Going over the free 100 GB of data is allowed." if s["allow_over"] else
+               "It also stops itself at 99.99 GB of data for the month, so data stays free.")
+        self.cost.set(cost_text(s["max_hours"], s["size"]) + " " + cap)
 
     def step(self, key):
         """Called from the worker thread: the job moved on to step `key`."""
@@ -1101,7 +1169,7 @@ class App:
         capped = self.data_warnings(self.data_used, allow_over, server_gone=not insts)
         if insts:
             i = insts[0]
-            up = uptime_text(i["LaunchTime"], server_hours(i)) + "\n" + data
+            up = uptime_text(i["LaunchTime"], server_hours(i), size=i.get("InstanceType", INSTANCE_TYPE)) + "\n" + data
             ip = i.get("PublicIpAddress", "no IP yet")
             if tunnel and not self.connected_ip:  # app was closed while connected: pick the connection up
                 try:
@@ -1192,49 +1260,126 @@ class App:
             self.log(f"Signed in with MFA until {self.session_expiry.astimezone():%H:%M} (credentials kept in memory only)")
         return Aws(self.log, settings, self.session)
 
-    def settings_dialog(self):
+    def settings_dialog(self, advanced=False):
         if self.busy:
             return
-        s = load_settings()
+        s, px = load_settings(), self.px
         w = tk.Toplevel(self.root)
-        w.title("AWS settings")
+        w.title("Settings")
         w.transient(self.root)
         w.grab_set()
         w.resizable(False, False)
-        mfa = tk.BooleanVar(value=s["mfa"])
-        tk.Checkbutton(w, text="Require MFA (recommended)", variable=mfa, font=("Segoe UI", 10, "bold"),
-                       command=lambda: update_mode()).grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(10, 0))
-        mode_note = tk.Label(w, fg="gray", justify="left", anchor="w")
-        mode_note.grid(row=1, column=0, columnspan=2, sticky="w", padx=26, pady=(0, 8))
-        fields = {}
-        rows = (("Region", "region", s["region"], ""),
-                ("Session Manager role (optional)", "ssm_role", s["ssm_role"], ""),
-                ("Access key ID", "key_id", "", ""),
-                ("Secret access key", "secret", "", "•"))
-        for r, (label, key, value, show) in enumerate(rows, start=2):
-            tk.Label(w, text=label, anchor="w").grid(row=r, column=0, sticky="w", padx=10, pady=4)
-            e = tk.Entry(w, width=46, show=show)
-            e.insert(0, value)
-            e.grid(row=r, column=1, padx=10, pady=4)
-            fields[key] = e
-        tk.Label(w, fg="gray", justify="left", text=(
-            "Leave both key fields empty to keep the key already saved.\n"
-            "The key is stored encrypted for your Windows account and is never shown again.")
-        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=10)
+        w.configure(bg=THEME["bg"])
+        dark_title_bar(w)
+        body = ttk.Frame(w, padding=px(18))
+        body.pack(fill="both", expand=True)
+
+        def section(parent, title):
+            c = card(parent, px)
+            ttk.Label(c, text=title, style="Title.Card.TLabel").grid(row=0, column=0, columnspan=2, sticky="w",
+                                                                     pady=(0, px(6)))
+            c.columnconfigure(1, weight=1)
+            return c
+
+        def note(parent, row, text="", var=None):
+            label = ttk.Label(parent, text=text, textvariable=var, style="Muted.Card.TLabel",
+                              wraplength=px(560), justify="left")
+            label.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, px(6)))
+            return label
+
+        def field(parent, row, label, widget):
+            ttk.Label(parent, text=label, style="Card.TLabel").grid(row=row, column=0, sticky="w",
+                                                                    padx=(0, px(12)), pady=px(4))
+            widget.grid(row=row, column=1, sticky="ew", pady=px(4))
+            return widget
+
+        # tabs: the first holds everything a beginner needs; the rest are optional
+        tabs = ttk.Notebook(body)
+        tabs.pack(fill="both", expand=True)
+        pages = {}
+        for name in ("AWS access", "Server & data", "Security", "Appearance"):
+            pages[name] = ttk.Frame(tabs, padding=(0, px(12), 0, 0))
+            tabs.add(pages[name], text=name)
+
+        basic = section(pages["AWS access"], "AWS access")
+        basic.pack(fill="x")
+        key_id = field(basic, 1, "Access key ID", ttk.Entry(basic, width=46))
+        secret = field(basic, 2, "Secret access key", ttk.Entry(basic, width=46, show="•"))
+        region = field(basic, 3, "Region", ttk.Combobox(basic, values=REGIONS, width=44))
+        region.set(s["region"])
+        note(basic, 4, "Leave the key fields empty to keep the key already saved. It is stored encrypted for your "
+                       "Windows account and never shown again. Choose the AWS region nearest to you.")
+        ttk.Button(basic, text="Copy IAM policy", command=lambda: copy_user_policy()).grid(
+            row=5, column=0, columnspan=2, sticky="w")
+
+        server = section(pages["Server & data"], "Server")
+        server.pack(fill="x")
+        size_names = {f"{k}  -  {v[1]}": k for k, v in SERVER_SIZES.items()}
+        size = field(server, 1, "Size", ttk.Combobox(server, values=list(size_names), state="readonly", width=60))
+        size.set(next(n for n, k in size_names.items() if k == s["size"]))
+        hours = tk.StringVar(value=str(s["max_hours"]))
+        row = ttk.Frame(server, style="Card.TFrame")
+        field(server, 2, "Delete after", row)
+        ttk.Spinbox(row, from_=1, to=MAX_HOURS_LIMIT, width=4, textvariable=hours, justify="center").pack(side="left")
+        ttk.Label(row, text="hours, even if you never press Stop", style="Card.TLabel").pack(side="left", padx=px(8))
+        estimate = tk.StringVar()
+        note(server, 3, var=estimate)
+
+        def update_estimate(*_):
+            k, h = size_names.get(size.get(), INSTANCE_TYPE), clamp_hours(hours.get())
+            estimate.set(f"Estimate: about ${hourly_usd(k):.3f} per hour while it runs, at most "
+                         f"{money(h * hourly_usd(k))} per session ({h} h). Mumbai prices; other regions differ "
+                         "a little. Bigger servers handle more people at once.")
+        size.bind("<<ComboboxSelected>>", update_estimate)
+        hours.trace_add("write", update_estimate)
+        update_estimate()
+
+        data = section(pages["Server & data"], "Data")
+        data.pack(fill="x", pady=(px(12), 0))
         over = tk.BooleanVar(value=s["allow_over"])
-        tk.Checkbutton(w, text="Allow going over the free 100 GB of data a month", variable=over
-                       ).grid(row=7, column=0, columnspan=2, sticky="w", padx=6, pady=(12, 0))
-        tk.Label(w, fg="gray", justify="left", text=(
-            "Off (recommended): a server stops itself at 99.99 GB of data this month, so data never costs you\n"
-            "anything; Start is blocked until the 1st. On: no data limit; beyond 100 GB you pay about $0.09-0.11 per GB.")
-        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=26)
+        ttk.Checkbutton(data, text="Allow going over the free 100 GB of data a month", variable=over,
+                        style="Card.TCheckbutton").grid(row=1, column=0, columnspan=2, sticky="w")
+        note(data, 2, "Off (recommended): a server stops itself at 99.99 GB of data for the month, so data never "
+                      "costs you anything. On: no limit; beyond 100 GB you pay about $0.09-0.11 per GB.")
+
+        sec = section(pages["Security"], "Extra security")
+        sec.pack(fill="x")
+        mfa = tk.BooleanVar(value=s["mfa"])
+        ttk.Checkbutton(sec, text="Require a code from my phone (MFA)", variable=mfa, style="Card.TCheckbutton",
+                        command=lambda: update_mode()).grid(row=1, column=0, columnspan=2, sticky="w")
+        mode_note = note(sec, 2)
+        role_bar = ttk.Frame(sec, style="Card.TFrame")
+        role_bar.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, px(6)))
+        role_buttons = [ttk.Button(role_bar, text="Copy role trust policy", command=lambda: copy_trust_policy()),
+                        ttk.Button(role_bar, text="Copy role permissions", command=lambda: copy_role_permissions())]
+        for b in role_buttons:
+            b.pack(side="left", padx=(0, px(8)))
+        ssm_role = field(sec, 4, "Session Manager role", ttk.Entry(sec, width=40))
+        ssm_role.insert(0, s["ssm_role"])
+        note(sec, 5, "Optional: an EC2 role that lets you open a shell on the server from the AWS console.")
+
+        look = section(pages["Appearance"], "Appearance")
+        look.pack(fill="x")
+        theme_names = {"Same as Windows": "system", "Light": "light", "Dark": "dark"}
+        theme = field(look, 1, "Theme", ttk.Combobox(look, values=list(theme_names), state="readonly", width=20))
+        theme.set(next(n for n, k in theme_names.items() if k == s["theme"]))
+
+        def update_mode():
+            mode_note.config(text=(
+                "On: your access key alone can do nothing. Each sign-in also needs a code from your phone, and AWS "
+                "access lasts 1 hour, in memory only. Needs a role in AWS (README: Extra security with MFA)."
+                if mfa.get() else
+                "Off (simplest): the key itself holds the app's limited permissions. If it were stolen, it could only "
+                "start and delete the app's small servers; every other safeguard stays."))
+            for b in role_buttons:
+                b.config(state="normal" if mfa.get() else "disabled")
 
         def region_ok():
-            region = fields["region"].get().strip()
-            if not valid_region(region):
-                messagebox.showerror("AWS settings", "Enter a region code such as ap-south-1.", parent=w)
+            r = region.get().strip()
+            if not valid_region(r):
+                messagebox.showerror("Settings", "Enter a region code such as ap-south-1.", parent=w)
                 return None
-            return region
+            return r
 
         def copy(text, title, where):
             self.root.clipboard_clear()
@@ -1242,76 +1387,65 @@ class App:
             messagebox.showinfo(title, "Copied to the clipboard.\n\n" + where, parent=w)
 
         def typed_or_saved_record():
-            key_id, secret = fields["key_id"].get().strip(), fields["secret"].get().strip()
-            if key_id or secret:
+            kid, sec_ = key_id.get().strip(), secret.get().strip()
+            if kid or sec_:
                 w.config(cursor="watch")
                 w.update()
                 try:
-                    return inspect_key(key_id, secret)[0]
+                    return inspect_key(kid, sec_)[0]
                 finally:
                     w.config(cursor="")
             return load_key()
 
-        def copy_key_policy():
+        def copy_user_policy():
             if mfa.get():
                 copy(json.dumps(key_policy(), indent=2), "User policy",
-                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-key, "
-                     "and attach it to the proxy-on-demand user (README step 5).")
+                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-key, and attach it "
+                     "to the proxy-on-demand user (README: Extra security with MFA).")
                 return
-            region = region_ok()
-            if region:  # no MFA: the user itself holds the least-privilege EC2 permissions
-                copy(json.dumps(iam_policy(region, fields["ssm_role"].get().strip()), indent=2), "User policy",
-                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-ec2, "
-                     "and attach it to the proxy-on-demand user (README, setup without MFA).")
-
-        def update_mode():
-            on = mfa.get()
-            mode_note.config(text=(
-                "Your access key alone can do nothing: each sign-in also needs a code from your phone,\n"
-                "and AWS access lasts 1 hour, in memory only. Best if your laptop could ever be compromised."
-                if on else
-                "The key itself holds the app's least-privilege permissions; no phone codes.\n"
-                "Anyone who gets the key can start and delete the app's small servers (all other safeguards stay)."))
-            for b in role_buttons:
-                b.config(state="normal" if on else "disabled")
+            r = region_ok()
+            if r:  # no MFA: the user itself holds the least-privilege EC2 permissions
+                copy(json.dumps(iam_policy(r, ssm_role.get().strip()), indent=2), "User policy",
+                     "IAM > Policies > Create policy > JSON: paste, name it proxy-on-demand-ec2, and attach it to "
+                     "the proxy-on-demand user (README, Quick Start step 5).")
 
         def copy_role_permissions():
-            region = region_ok()
-            if region:
-                copy(json.dumps(iam_policy(region, fields["ssm_role"].get().strip()), indent=2),
-                     "Role permissions", "IAM > Policies > Create policy > JSON: paste and name it "
-                     "proxy-on-demand-ec2 (README step 7).")
+            r = region_ok()
+            if r:
+                copy(json.dumps(iam_policy(r, ssm_role.get().strip()), indent=2), "Role permissions",
+                     "IAM > Policies > Create policy > JSON: paste and name it proxy-on-demand-ec2 "
+                     "(README: Extra security with MFA).")
 
         def copy_trust_policy():
             try:
                 record = typed_or_saved_record()
             except Exception as e:
-                return messagebox.showerror("AWS settings", str(e), parent=w)
+                return messagebox.showerror("Settings", str(e), parent=w)
             if not record:
-                return messagebox.showerror("AWS settings", "Enter the access key first: the trust policy "
-                                            "names the user that owns it.", parent=w)
+                return messagebox.showerror("Settings", "Enter the access key first: the trust policy names "
+                                            "the user that owns it.", parent=w)
             copy(json.dumps(trust_policy(record["user_arn"]), indent=2), "Role trust policy",
-                 f"IAM > Roles > Create role > Custom trust policy: paste, attach proxy-on-demand-ec2, "
-                 f"and name the role {ROLE_NAME} (README step 7).")
+                 f"IAM > Roles > Create role > Custom trust policy: paste, attach proxy-on-demand-ec2, and name "
+                 f"the role {ROLE_NAME} (README: Extra security with MFA).")
 
         def save():
-            region, role = region_ok(), fields["ssm_role"].get().strip()
-            if not region:
+            r = region_ok()
+            if not r:
                 return
-            if region != s["region"] and self.server_up:  # would orphan a billing server in the old region
-                return messagebox.showerror("AWS settings", "Press Stop before changing the region, "
-                                            "so the server in the current region is terminated.", parent=w)
-            key_id, secret = fields["key_id"].get().strip(), fields["secret"].get().strip()
+            if r != s["region"] and self.server_up:  # would orphan a billing server in the old region
+                return messagebox.showerror("Settings", "Press Stop before changing the region, so the server in "
+                                            "the current region is deleted.", parent=w)
+            kid, sec_ = key_id.get().strip(), secret.get().strip()
             saved = load_key()
-            if not (key_id or secret) and saved and mfa.get() != s["mfa"]:
-                key_id, secret = saved["key_id"], saved["secret"]  # MFA switched: re-check the saved key
-            if key_id or secret:
+            if not (kid or sec_) and saved and mfa.get() != s["mfa"]:
+                kid, sec_ = saved["key_id"], saved["secret"]  # MFA switched: re-check the saved key
+            if kid or sec_:
                 w.config(cursor="watch")
                 w.update()
                 try:
-                    record, warnings = inspect_key(key_id, secret, mfa.get(), region)
+                    record, warnings = inspect_key(kid, sec_, mfa.get(), r)
                 except Exception as e:
-                    return messagebox.showerror("AWS settings", f"This key cannot be used:\n\n{e}", parent=w)
+                    return messagebox.showerror("Settings", f"This key cannot be used:\n\n{e}", parent=w)
                 finally:
                     w.config(cursor="")
                 if warnings and not messagebox.askyesno(
@@ -1319,27 +1453,31 @@ class App:
                     return
                 save_key(record)
                 self.log(f"AWS key saved, encrypted (user {record['user_arn'].split('/')[-1]})")
-            save_settings({"mfa": mfa.get(), "region": region, "ssm_role": role, "allow_over": over.get()})
+            new_theme = theme_names[theme.get()]
+            save_settings({"mfa": mfa.get(), "region": r, "ssm_role": ssm_role.get().strip(),
+                           "allow_over": over.get(), "max_hours": clamp_hours(hours.get()),
+                           "size": size_names[size.get()], "theme": new_theme})
+            if new_theme != s["theme"]:
+                messagebox.showinfo("Settings", "The new theme applies the next time you open the app.", parent=w)
             self.session = None  # settings or key changed: sign in again
+            self.update_cost()
             w.destroy()
-            self.refresh()  # signs in (with the MFA code if enabled) and proves the whole setup works
+            self.refresh()  # signs in (with the MFA code if enabled) and proves the setup works
 
-        bar = tk.Frame(w)
-        bar.grid(row=9, column=0, columnspan=2, pady=(10, 4))
-        tk.Button(bar, text="Copy user policy", command=copy_key_policy).pack(side="left", padx=4)
-        role_buttons = [tk.Button(bar, text="Copy role trust policy", command=copy_trust_policy),
-                        tk.Button(bar, text="Copy role permissions", command=copy_role_permissions)]
-        for b in role_buttons:
-            b.pack(side="left", padx=4)
-        bar2 = tk.Frame(w)
-        bar2.grid(row=10, column=0, columnspan=2, pady=(4, 10))
-        tk.Button(bar2, text="Save and sign in", command=save).pack(side="left", padx=6)
-        tk.Button(bar2, text="Cancel", command=w.destroy).pack(side="left", padx=6)
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(px(16), 0))
+        ttk.Button(buttons, text="Save", style="Accent.TButton", command=save).pack(side="right")
+        ttk.Button(buttons, text="Cancel", command=w.destroy).pack(side="right", padx=px(8))
         update_mode()
+        if advanced:
+            tabs.select(pages["Server & data"])
+        w.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - w.winfo_reqwidth()) // 2
+        w.geometry(f"+{max(0, x)}+{max(0, self.root.winfo_rooty() - px(20))}")
 
     def start(self):
-        self.save_hours()
-        hours = load_settings()["max_hours"]
+        settings = load_settings()
+        hours, size = settings["max_hours"], settings["size"]
 
         def job():
             self.step("signin")
@@ -1380,7 +1518,7 @@ class App:
                     inst = aws.wait_running(live[0]["InstanceId"])
                 else:
                     cap = self.data_allowance(aws)
-                    launched = aws.launch(password, sg, subnet, hours, cap)
+                    launched = aws.launch(password, sg, subnet, hours, cap, size)
                     record_instance(launched, aws.region)  # counted toward the month even if it fails later
                     inst = aws.wait_running(launched)
                 ip = inst["PublicIpAddress"]
@@ -1418,10 +1556,10 @@ class App:
             self.connected_ip, self.health_failures = got, 0
             self.log(f"Successfully connected. Your public IP is now {got}")
             self.report(aws)
-            server_h = server_hours(inst)
+            server_h, rate = server_hours(inst), hourly_usd(inst.get("InstanceType", INSTANCE_TYPE))
             self.q.put(("popup", f"Successfully connected.\n\nYour traffic now leaves via {got} ({aws.region}).\n\n"
                                  f"Press Stop when you are done. Otherwise the server deletes itself after "
-                                 f"{server_h} h (at most about {money(server_h * HOURLY_USD)}).\n\n"
+                                 f"{server_h} h (at most about {money(server_h * rate)}).\n\n"
                                  "Changed network (e.g. Wi-Fi to mobile data) and it stops working? "
                                  "Press Reconnect."))
         self.run(job, START_STEPS, "Reconnecting..." if self.server_up else "Starting...")
