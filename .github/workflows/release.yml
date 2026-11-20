@@ -21,7 +21,9 @@ jobs:
           [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME does not match __version__ $v"; exit 1; }
       - run: python test_proxy_app.py
       - name: Build
-        run: pyinstaller --noconfirm --clean --onefile --windowed --uac-admin --name ProxyOnDemand proxy_app.py
+        run: |
+          python scripts/make_version_file.py
+          pyinstaller --noconfirm --clean --onefile --windowed --uac-admin --name ProxyOnDemand --version-file version_info.txt proxy_app.py
       - name: Self-check the built exe (bundled libraries, Tk, DPAPI)
         shell: pwsh
         run: |

@@ -2,6 +2,18 @@
 
 All notable changes to this project. Versions follow [Semantic Versioning](https://semver.org/). Each version's section here becomes its GitHub Release notes.
 
+## 1.1.0
+
+- **Free-data cap (on by default).** Each server stops itself, which deletes it, when this month's data reaches 99.99 GB, just under AWS's free 100 GB.
+  - The server enforces it on its own every 5 seconds, even while your laptop is off.
+  - The app shows "Data this month: x of the free 100 GB" and warns at 80 % and 95 %.
+  - It explains when a server stopped at the limit, and blocks Start until the 1st of the next month.
+  - Opt out with "Allow going over the free 100 GB" in AWS settings.
+- **Adaptive refresh.** While a server runs, the window updates every 15 minutes, or every 5 minutes within 10 GB of the limit.
+- **New look.** Cleaner card-based design that sizes itself from the screen's DPI, so it looks the same on 1080p, 1440p and 4K laptops. Text is sharp on high-resolution screens, and the activity log is hidden until you ask for it.
+- `ProxyOnDemand.exe` now carries its product name and version in its Windows file properties.
+- **Action needed for existing users:** the app's IAM policy gains one read-only permission, `cloudwatch:GetMetricStatistics`, to measure data. See "Updating your IAM policy" in the README.
+
 ## 1.0.0
 
 First release.

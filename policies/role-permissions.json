@@ -10,7 +10,8 @@
         "ec2:DescribeVpcs",
         "ec2:DescribeSubnets",
         "ec2:DescribeSecurityGroups",
-        "ec2:CreateSecurityGroup"
+        "ec2:CreateSecurityGroup",
+        "cloudwatch:GetMetricStatistics"
       ],
       "Resource": "*",
       "Condition": {

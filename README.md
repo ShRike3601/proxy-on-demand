@@ -123,14 +123,48 @@ On the first Start the app also downloads sing-box, the VPN engine. It's the off
 | Part | What it tells you |
 |---|---|
 | **Coloured dot and headline** | Grey: not connected, nothing billing. Orange: working. Green: connected. Amber: needs your attention (for example, a server is running but this laptop isn't connected). Red: something went wrong. |
-| **Detail line** | While a server runs: how long it has run, its cost so far, the most it can cost, and when it deletes itself. |
+| **Detail line** | While a server runs: how long it has run, its cost so far, the most it can cost, and when it deletes itself. Always: **how much of this month's free 100 GB of data is used**. |
 | **Progress bar** | Shown while Start, Stop or Refresh runs. It names the current step ("Server is installing Shadowsocks", step 5 of 7) and estimates the time left from typical runs. If a step takes longer than usual, it says so instead of freezing or jumping to 100%. |
 | **Start / Reconnect** | Start creates a server and connects you. While a server exists the button reads **Reconnect** (see below). |
 | **Stop** | Disconnects you first, so your normal internet returns, then deletes the server and checks that nothing is left billing. |
 | **Refresh** | Re-checks AWS and the connection. |
 | **AWS settings** | MFA, region and access key (Quick Start Steps 4–8). |
 | **Logs** | Opens the folder that holds `app.log`. |
-| **Activity** | Everything the app does, step by step. The same text is saved in `app.log`. |
+| **Show activity** | Unfolds a log of everything the app does, step by step. The same text is saved in `app.log`. |
+
+The window sizes itself from your screen's scaling setting, so it looks the same on a 1080p laptop, a 1440p screen or a 4K display.
+
+### Monthly data limit (free 100 GB)
+
+AWS gives every account **100 GB of outbound data per month free**; beyond that, data costs about USD 0.09–0.11 per GB. Data, not server time, is what can get expensive, especially if several people use one server. So by default the app keeps you inside the free 100 GB:
+
+- **The server enforces it itself.**
+  - When you press Start, the app works out how much of this month's 100 GB is left and gives that allowance to the new server.
+  - The server checks its own outgoing traffic every 5 seconds and stops itself, which deletes it, at **99.99 GB for the month**.
+  - This works even if your laptop is off, asleep or the app is closed.
+- **The app shows and warns.**
+  - The detail line shows "Data this month: x of the free 100 GB, y left".
+  - A warning pops up once at **80 GB** and once at **95 GB**.
+  - If a server stopped itself at the limit, the app says so in plain words.
+  - Start is then blocked until the **1st of next month (UTC)**, when the free 100 GB resets.
+- **How often it updates:**
+  - While a server runs, the window updates every **15 minutes**, and every **5 minutes** once less than 10 GB is left. AWS's traffic figures (CloudWatch) only update every 5 minutes, so checking more often would show nothing new.
+  - The stop at the limit doesn't depend on this: the server does it within seconds.
+  - **Refresh** updates immediately.
+- **Going over on purpose:** tick **"Allow going over the free 100 GB of data a month"** in AWS settings. Servers then have no data limit and keep running until Stop or auto-delete. The warnings still appear, and data beyond 100 GB is billed.
+
+What it counts:
+- Data sent by the app's servers this calendar month (UTC), including servers that already deleted themselves.
+- "GB" here is 10⁹ bytes. AWS bills by 2³⁰-byte GB, so stopping at 99.99 leaves roughly 7 GB of real slack for measurement delay.
+- The free 100 GB is **shared with everything else on your AWS account** that sends data to the internet, so other use isn't counted here. Your budget alert (Step 2) watches the whole account.
+- Servers started by app versions before 1.1.0 aren't counted for the month they ran.
+
+### Updating your IAM policy (when upgrading from 1.0.0)
+
+Version 1.1.0 needs one extra, read-only permission, `cloudwatch:GetMetricStatistics`, to measure data. Until you add it, the app shows "Data this month: unknown" and refuses to start a capped server.
+
+1. In the app open **AWS settings** and click **Copy role permissions** (with MFA) or **Copy user policy** (without MFA).
+2. In the AWS console go to IAM → Policies → `proxy-on-demand-ec2` → **Edit** → JSON, replace everything with the copied text, and save.
 
 ### Switching networks: Reconnect
 
@@ -222,7 +256,8 @@ While a server already exists, the button reads **Reconnect** and skips step 4. 
 | Two servers at once | Start never launches a second server. |
 | Changing region strands a server | The app refuses to change region while a server is running. |
 | Credentials are stolen | See [Security model](#security-model). |
-| Anything else, such as data-transfer charges | The budget alert, kill switch and anomaly detection (Steps 2 and 9). |
+| Too much data (several users, streaming) | Servers stop themselves at 99.99 GB of data for the month, with warnings at 80 and 95 GB. See [Monthly data limit](#monthly-data-limit-free-100-gb). |
+| Anything else, such as other AWS use | The budget alert, kill switch and anomaly detection (Steps 2 and 9). |
 
 ## Cost (approximate)
 
@@ -251,6 +286,8 @@ After Stop: nothing. The app's security group, IAM user and role are free.
 | "Signed out" in the status line | The 1-hour sign-in ended. Press Refresh and enter a new code. |
 | "Traffic left via …" | Another VPN is active. Turn it off and press Start. |
 | Works on one network but not another | Some networks block this kind of traffic even on port 443. |
+| "Data this month: unknown" or "can't read this month's data usage" | Update your IAM policy (see [Updating your IAM policy](#updating-your-iam-policy-when-upgrading-from-100)). |
+| "free 100 GB of data is used up" | The limit for this month is reached. Wait for the 1st (UTC), or allow going over in AWS settings. |
 
 ## Files on your laptop
 
@@ -324,6 +361,41 @@ Set `SINGBOX_EXE` to a `sing-box.exe` to also validate the generated config. `--
    - publishes a GitHub Release with the `.exe`, its SHA-256 checksum, and the changelog section as notes.
 
 Every Python dependency is pinned to an exact version (`requirements.txt`, plus `requirements-build.txt` for PyInstaller). Dependabot opens a pull request each month when updates exist.
+
+## Privacy policy
+
+The app has no servers or telemetry of its own, and the author receives nothing. It connects only to:
+
+| Service | Why | What it sees |
+|---|---|---|
+| **Your own AWS account** (EC2, CloudWatch, IAM/STS) | To create, check and delete your server, and measure its data | Your requests, under your own AWS account. AWS's [privacy notice](https://aws.amazon.com/privacy/) applies. |
+| **Your own server** | The proxy itself | Your internet traffic, encrypted in transit; it's then sent on to the sites you visit. |
+| `checkip.amazonaws.com`, `api.ipify.org`, `ipv4.icanhazip.com` | To find your public IPs for the server's firewall, and to confirm the tunnel works | Your public IP address, as with any website. |
+| `github.com`, `api.github.com` | One-time sing-box download (checksum-verified), the server's Shadowsocks download, and the "new version available" check | Your public IP address. Nothing is uploaded. |
+
+Your AWS key, proxy password and settings stay on your laptop, in `%USERPROFILE%\.proxy-on-demand`. The key is encrypted for your Windows account.
+
+**Changes to your system:**
+- While connected, sing-box adds a network adapter (`sing-tun`) and routes, and removes them when stopped.
+- If Cloudflare WARP is running, the app disconnects it during a session and reconnects it after Stop.
+- Nothing else is changed.
+
+## Uninstall
+
+1. Press **Stop**, and wait for "Nothing is billing".
+2. Delete `ProxyOnDemand.exe`, or the source folder.
+3. Delete the folder `%USERPROFILE%\.proxy-on-demand`: your encrypted key, settings, logs and sing-box.
+4. Optional, in the AWS console: delete the IAM user `proxy-on-demand` (with its access key), the policies `proxy-on-demand-ec2` and `proxy-on-demand-key`, the role `proxy-on-demand-role`, and the EC2 security group `ss-proxy-sg`.
+
+## Code signing policy
+
+Windows releases are built from this repository's source by [GitHub Actions](.github/workflows/release.yml), on GitHub-hosted runners, with every dependency pinned.
+
+- **Committers and reviewers:** [ShRike3601](https://github.com/ShRike3601) (maintainer). Changes from anyone else, including Dependabot, are reviewed by the maintainer before they're merged.
+- **Approvers:** [ShRike3601](https://github.com/ShRike3601). Each release is approved manually.
+- **Privacy:** see [Privacy policy](#privacy-policy). This program won't transfer any information to other networked systems unless the user or the person running it specifically requests it, except for the services listed there.
+
+*Releases are not code-signed yet. Free code signing for open-source projects is being requested from [SignPath Foundation](https://signpath.org).*
 
 ## License
 

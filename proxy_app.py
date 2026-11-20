@@ -28,10 +28,10 @@ import time
 import tkinter as tk
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
-from tkinter import messagebox, scrolledtext, simpledialog, ttk
+from datetime import datetime, timedelta, timezone
+from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 REPO = "ShRike3601/proxy-on-demand"  # GitHub repo, for the "new version available" notice
 ROLE_NAME = "proxy-on-demand-role"  # IAM role holding the app's EC2 permissions; assumable only with MFA
 SESSION_SECONDS = 3600              # temporary credentials last 1 hour, in memory only
@@ -50,8 +50,9 @@ APP_DIR = os.path.join(os.path.expanduser("~"), ".proxy-on-demand")
 OLD_APP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "proxy-on-demand")  # earlier versions
 APP_LOG = os.path.join(APP_DIR, "app.log")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+USAGE_FILE = os.path.join(APP_DIR, "usage.json")  # this month's servers, for the data allowance
 DEFAULT_SETTINGS = {"mfa": True, "region": "ap-south-1", "ssm_role": "",  # MFA on unless the user opts out
-                    "max_hours": 12}
+                    "max_hours": 12, "allow_over": False}  # allow_over: let data go past the free 100 GB
 KEY_FILE = os.path.join(APP_DIR, "aws-key.bin")  # DPAPI-encrypted, readable only by this Windows user
 DPAPI_ENTROPY = b"proxy-on-demand/aws-key/v1"
 PLAINTEXT_CRED_FILE = os.environ.get("AWS_SHARED_CREDENTIALS_FILE") or \
@@ -374,7 +375,8 @@ def iam_policy(region, ssm_role=""):
     statements = [
         {"Sid": "ReadAndCreateSg", "Effect": "Allow",
          "Action": ["ec2:DescribeInstances", "ec2:DescribeVolumes", "ec2:DescribeVpcs", "ec2:DescribeSubnets",
-                    "ec2:DescribeSecurityGroups", "ec2:CreateSecurityGroup"],
+                    "ec2:DescribeSecurityGroups", "ec2:CreateSecurityGroup",
+                    "cloudwatch:GetMetricStatistics"],  # read-only: how much data the app's servers sent
          "Resource": "*", "Condition": {"StringEquals": {"aws:RequestedRegion": region}}},
         {"Sid": "LaunchOnlyTaggedT3Micro", "Effect": "Allow", "Action": "ec2:RunInstances",
          "Resource": ec2 + "instance/*",
@@ -460,9 +462,36 @@ def my_ips(rounds=3):
 
 # ---------- server side: EC2 ----------
 
-def user_data(password, max_hours=MAX_HOURS):
-    """First-boot script: install shadowsocks-rust (checksum-verified) and run it as a service."""
+DATA_CAP_SCRIPT = r"""cat > /usr/local/bin/data-cap.sh <<'EOF'
+#!/bin/bash
+# Powers this server off (which deletes it) once it has sent LIMIT bytes: the free data left this month.
+IF=$(ip -o route show default | awk '{print $5; exit}')
+while sleep 5; do
+  if [ "$(cat /sys/class/net/$IF/statistics/tx_bytes)" -ge LIMIT ]; then
+    logger -t data-cap "monthly free data used up: shutting down"; systemctl poweroff
+  fi
+done
+EOF
+chmod 755 /usr/local/bin/data-cap.sh
+cat > /etc/systemd/system/data-cap.service <<'EOF'
+[Unit]
+Description=Stop this server when its data allowance is used up
+[Service]
+ExecStart=/usr/local/bin/data-cap.sh
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now data-cap
+"""
+
+
+def user_data(password, max_hours=MAX_HOURS, cap_bytes=0):
+    """First-boot script: install shadowsocks-rust (checksum-verified) and run it as a service.
+    cap_bytes > 0: the server powers itself off after sending that many bytes (0 = no data cap)."""
     max_hours = clamp_hours(max_hours)
+    cap = DATA_CAP_SCRIPT.replace("LIMIT", str(int(cap_bytes))) if cap_bytes > 0 else ""
     ss_conf = json.dumps({"server": "0.0.0.0", "server_port": PORT, "password": password,
                           "method": METHOD, "mode": "tcp_and_udp"})
     # musl = statically linked: the -gnu build needs a newer glibc than Amazon Linux 2023 ships and crash-loops
@@ -475,7 +504,7 @@ exec > >(tee /var/log/ss-setup.log > /dev/console) 2>&1
 # safety net first, so it holds even if setup fails: launched with shutdown-behavior=terminate,
 # this ends all billing after {max_hours} h even if Stop is never pressed
 shutdown -h +{max_hours * 60}
-cd /tmp
+{cap}cd /tmp
 command -v xz || dnf install -y xz
 curl -fsSL --retry 5 -O {url} -O {url}.sha256
 sha256sum -c {f}.sha256
@@ -517,7 +546,27 @@ class Aws:
         self.region, self.ssm_role = settings["region"], settings["ssm_role"]
         self.ec2 = session.client("ec2", region_name=self.region)
         self.ssm = session.client("ssm", region_name=self.region)
+        self.cw = session.client("cloudwatch", region_name=self.region)
         self.log = log
+
+    def sent_bytes(self, iid, since, until):
+        """Bytes the server sent out between since and until (AWS CloudWatch NetworkOut; updates every 5 min)."""
+        points = self.cw.get_metric_statistics(
+            Namespace="AWS/EC2", MetricName="NetworkOut", Dimensions=[{"Name": "InstanceId", "Value": iid}],
+            StartTime=since, EndTime=until, Period=3600, Statistics=["Sum"])["Datapoints"]
+        return sum(p["Sum"] for p in points)
+
+    def month_usage(self, ledger, now=None):
+        """Data sent this calendar month (UTC) by every server this app launched, terminated ones included.
+        CloudWatch keeps hourly figures for 63 days, so a server that deleted itself still counts."""
+        now = now or datetime.now(timezone.utc)
+        start = month_start(now)
+        oldest = (start - timedelta(hours=MAX_HOURS_LIMIT)).isoformat()  # may have run into this month
+        # shortcut: servers in a region you switched away from this month aren't counted; the budget alert still is
+        ids = [iid for iid, info in ledger["instances"].items()
+               if info["region"] == self.region and info["launched"] >= oldest]
+        # with no servers yet, still make one call: it proves the IAM policy allows reading usage
+        return sum(self.sent_bytes(iid, start, now) for iid in ids) if ids else self.sent_bytes("i-none", start, now)
 
     def instances(self):
         r = self.ec2.describe_instances(Filters=[
@@ -563,14 +612,14 @@ class Aws:
             for p in ("tcp", "udp")])
         self.log(f"Inbound {PORT} now allowed only from your network: {', '.join(ips)}")
 
-    def launch(self, password, sg, subnet, max_hours=MAX_HOURS):
+    def launch(self, password, sg, subnet, max_hours=MAX_HOURS, cap_bytes=0):
         ami = self.ssm.get_parameter(Name=AMI_PARAM)["Parameter"]["Value"]
         max_hours = clamp_hours(max_hours)
         tags = [{"Key": "Name", "Value": "ss-proxy"}, {"Key": "app", "Value": APP_TAG},
                 {"Key": "auto-delete-hours", "Value": str(max_hours)}]  # read back for the countdown
         args = dict(
             ImageId=ami, InstanceType=INSTANCE_TYPE, MinCount=1, MaxCount=1,
-            UserData=user_data(password, max_hours),
+            UserData=user_data(password, max_hours, cap_bytes),
             InstanceInitiatedShutdownBehavior="terminate",   # a shutdown from inside also stops billing
             MetadataOptions={"HttpTokens": "required"},
             NetworkInterfaces=[{"DeviceIndex": 0, "SubnetId": subnet, "Groups": [sg],
@@ -607,6 +656,70 @@ class Aws:
         else:
             self.log("No proxy servers are running")
         return self.leftovers()
+
+
+# ---------- monthly data allowance ----------
+# AWS's first 100 GB a month of data out to the internet is free (all your AWS use together). GB here is
+# 10^9 bytes; AWS bills by 2^30-byte GB, so stopping at 99.99 leaves about 7 GB of slack for
+# measurement delay and other AWS use.
+FREE_DATA_BYTES = 100 * 10**9
+CAP_BYTES = int(99.99 * 10**9)
+WARN_AT = (0.80, 0.95)  # warn the owner once a month at these shares of the free 100 GB
+
+
+def month_start(now):
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def load_ledger(path=None):
+    """This app's servers ({id: {region, launched}}) and which warnings were shown, per month."""
+    try:
+        with open(path or USAGE_FILE, encoding="utf-8") as f:
+            ledger = json.load(f)
+    except (OSError, ValueError):
+        ledger = {}
+    return {"instances": ledger.get("instances", {}), "warned": ledger.get("warned", {})}
+
+
+def save_ledger(ledger, path=None):
+    os.makedirs(APP_DIR, exist_ok=True)
+    write_json(path or USAGE_FILE, ledger)
+
+
+def record_instance(iid, region, path=None, now=None):
+    now = now or datetime.now(timezone.utc)
+    ledger = load_ledger(path)
+    keep_after = (now - timedelta(days=70)).isoformat()  # CloudWatch keeps hourly data for 63 days
+    ledger["instances"] = {k: v for k, v in ledger["instances"].items() if v["launched"] >= keep_after}
+    ledger["instances"][iid] = {"region": region, "launched": now.isoformat()}
+    save_ledger(ledger, path)
+
+
+def gb(n_bytes):
+    return f"{n_bytes / 10**9:.1f} GB"
+
+
+def data_text(used, allow_over):
+    if used is None:
+        return ("Data this month: unknown. Your IAM policy needs updating: AWS settings > Copy role permissions "
+                "(or Copy user policy without MFA), and replace proxy-on-demand-ec2 with it.")
+    text = f"Data this month: {gb(used)} of the free 100 GB"
+    return text + (" (going over is allowed in AWS settings)" if allow_over else
+                   f", {gb(max(0, CAP_BYTES - used))} left before the server stops itself")
+
+
+def poll_seconds(used, allow_over):
+    """How often to refresh while a server runs: often near the limit, rarely far from it. CloudWatch
+    only updates every 5 minutes, so faster than that shows nothing new (the server itself enforces
+    the limit every 5 seconds either way)."""
+    if used is not None and not allow_over and CAP_BYTES - used < 10 * 10**9:
+        return 300
+    return 900
+
+
+def due_warnings(used, warned_this_month):
+    """Thresholds just crossed that haven't been shown this month."""
+    return [t for t in WARN_AT if used is not None and used >= t * FREE_DATA_BYTES and t not in warned_this_month]
 
 
 def server_hours(instance):
@@ -668,6 +781,59 @@ STOP_STEPS = [("disconnect", "Disconnecting", 3), ("signin", "Signing in to AWS"
               ("delete", "Deleting the server and checking nothing is left", 40)]
 REFRESH_STEPS = [("signin", "Signing in to AWS", 3), ("check", "Checking for running servers", 3)]
 COLORS = {"idle": "#9aa0a6", "busy": "#f29900", "ok": "#188038", "warn": "#e8710a", "error": "#d93025"}
+THEME = {"bg": "#f3f4f6", "card": "#ffffff", "line": "#e1e3e8", "text": "#1f2328", "muted": "#5f6368",
+         "accent": "#1a73e8", "accent_hover": "#1765cc", "accent_off": "#a8c7fa"}
+
+
+def scaler(root):
+    """px(n): n pixels at 100 % Windows scaling, converted for this screen. Fonts are in points and
+    scale by themselves; this keeps spacing in step with them on 1080p, 1440p and 4K alike."""
+    k = root.winfo_fpixels("1i") / 96
+    return lambda n: max(1, round(n * k))
+
+
+def style_app(root, px):
+    """One flat light theme built on Tk's own 'clam' (no extra library in the exe)."""
+    t = THEME
+    root.configure(bg=t["bg"])
+    for name in ("TkDefaultFont", "TkTextFont"):  # not option_add("*Font"): that would override ttk style fonts
+        tkfont.nametofont(name).configure(family="Segoe UI", size=11)
+    for pattern, value in (("*Background", t["bg"]), ("*Entry.Background", "white"), ("*Foreground", t["text"])):
+        root.option_add(pattern, value)  # also styles the AWS settings dialog
+    s = ttk.Style(root)
+    s.theme_use("clam")
+    s.configure(".", background=t["bg"], foreground=t["text"], font=("Segoe UI", 11), bordercolor=t["line"],
+                lightcolor=t["card"], darkcolor=t["line"], focuscolor=t["accent"])
+    s.configure("Card.TFrame", background=t["card"])
+    s.configure("Card.TLabel", background=t["card"])
+    s.configure("Muted.Card.TLabel", background=t["card"], foreground=t["muted"])
+    s.configure("Head.Card.TLabel", background=t["card"], font=("Segoe UI", 16, "bold"))
+    s.configure("Title.Card.TLabel", background=t["card"], font=("Segoe UI", 11, "bold"))
+    s.configure("TButton", background=t["card"], padding=(px(16), px(8)), relief="flat")
+    s.map("TButton", background=[("disabled", t["bg"]), ("active", "#eceef1")],
+          foreground=[("disabled", "#9aa0a6")])
+    s.configure("Accent.TButton", background=t["accent"], foreground="white", bordercolor=t["accent"],
+                lightcolor=t["accent"], darkcolor=t["accent"], font=("Segoe UI", 11, "bold"), padding=(px(26), px(8)))
+    s.map("Accent.TButton", background=[("disabled", t["accent_off"]), ("active", t["accent_hover"])],
+          foreground=[("disabled", "white")])
+    s.configure("Horizontal.TProgressbar", background=t["accent"], troughcolor="#e8eaed", bordercolor="#e8eaed",
+                lightcolor=t["accent"], darkcolor=t["accent"], thickness=px(10))
+    s.configure("TSpinbox", fieldbackground="white", arrowsize=px(11), padding=px(3))
+
+
+def card(parent, px):
+    """A white panel with a hairline border."""
+    return tk.Frame(parent, bg=THEME["card"], highlightthickness=1, highlightbackground=THEME["line"],
+                    padx=px(20), pady=px(18))
+
+
+def fit_to_screen(root, px):
+    """Size the window to its content (never more than 90 % of the screen) and centre it."""
+    root.update_idletasks()
+    w = min(root.winfo_reqwidth(), int(root.winfo_screenwidth() * 0.9))
+    h = min(root.winfo_reqheight(), int(root.winfo_screenheight() * 0.85))
+    root.minsize(min(w, px(560)), min(h, px(300)))
+    root.geometry(f"+{(root.winfo_screenwidth() - w) // 2}+{max(0, (root.winfo_screenheight() - h) // 3)}")
 
 
 def progress_estimate(steps, index, elapsed):
@@ -689,81 +855,77 @@ class App:
         self.root, self.q, self.busy, self.warp_was_on = root, queue.Queue(), False, False
         self.server_up, self.first_check = False, True
         self.session, self.session_expiry = None, None  # temporary AWS credentials, memory only
-        self.connected_ip, self.health_failures = None, 0
+        self.connected_ip, self.health_failures, self.data_used = None, 0, None
         self.steps, self.step_index, self.step_started = None, 0, 0.0
         os.makedirs(APP_DIR, exist_ok=True)
         moved = migrate_old_files()
 
         root.title(f"Proxy on demand {__version__}")
-        root.geometry("900x720")
-        root.minsize(780, 620)
-        root.option_add("*Font", ("Segoe UI", 10))
-        style = ttk.Style()
-        style.configure("TLabel", font=("Segoe UI", 10))
-        style.configure("TButton", font=("Segoe UI", 10), padding=(12, 6))
-        style.configure("Big.TButton", font=("Segoe UI", 11, "bold"), padding=(26, 10))
-        style.configure("TLabelframe.Label", font=("Segoe UI", 10, "bold"))
-        pad = 24  # outer margin
+        px = self.px = scaler(root)  # every size below is in "100 % scaling" pixels, scaled to this screen
+        style_app(root, px)
 
-        # status: colored dot, headline, detail line
-        top = ttk.Frame(root, padding=(pad, 22, pad, 10))
-        top.pack(fill="x")
-        self.dot = tk.Label(top, text="●", font=("Segoe UI", 24), fg=COLORS["idle"])
-        self.dot.pack(side="left", anchor="n")
-        text = ttk.Frame(top)
-        text.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        outer = ttk.Frame(root, padding=px(22))
+        outer.pack(fill="both", expand=True)
+
+        # status card: colored dot, headline, detail, and the progress bar while something runs
+        status = card(outer, px)
+        status.pack(fill="x")
+        self.dot = tk.Label(status, text="●", font=("Segoe UI", 22), fg=COLORS["idle"], bg=THEME["card"])
+        self.dot.grid(row=0, column=0, sticky="n", padx=(0, px(10)))
         self.status, self.detail = tk.StringVar(value="Checking..."), tk.StringVar()
-        ttk.Label(text, textvariable=self.status, font=("Segoe UI", 15, "bold")).pack(anchor="w")
-        ttk.Label(text, textvariable=self.detail, foreground="#5f6368", justify="left",
-                  wraplength=760).pack(anchor="w", pady=(4, 0))
-
-        # progress (shown only while something runs)
-        self.progress = ttk.Frame(root, padding=(pad, 4, pad, 8))
+        ttk.Label(status, textvariable=self.status, style="Head.Card.TLabel").grid(row=0, column=1, sticky="w")
+        ttk.Label(status, textvariable=self.detail, style="Muted.Card.TLabel", justify="left",
+                  wraplength=px(640)).grid(row=1, column=1, sticky="w", pady=(px(4), 0))
+        status.columnconfigure(1, weight=1)
+        self.progress = ttk.Frame(status, style="Card.TFrame")  # gridded by run(), hidden by "done"
         self.bar = ttk.Progressbar(self.progress, mode="determinate", maximum=1000)
-        self.bar.pack(fill="x", ipady=3)
+        self.bar.pack(fill="x")
         self.step_text = tk.StringVar()
-        ttk.Label(self.progress, textvariable=self.step_text, foreground="#5f6368").pack(anchor="w", pady=(6, 0))
+        ttk.Label(self.progress, textvariable=self.step_text, style="Muted.Card.TLabel").pack(anchor="w", pady=(px(6), 0))
 
         # buttons
-        self.controls = ttk.Frame(root, padding=(pad, 10, pad, 14))
-        self.controls.pack(fill="x")
-        self.start_btn = ttk.Button(self.controls, text="Start", style="Big.TButton", command=self.start)
-        self.stop_btn = ttk.Button(self.controls, text="Stop", style="Big.TButton", command=self.stop)
+        self.controls = ttk.Frame(outer)
+        self.controls.pack(fill="x", pady=px(16))
+        self.start_btn = ttk.Button(self.controls, text="Start", style="Accent.TButton", command=self.start)
+        self.stop_btn = ttk.Button(self.controls, text="Stop", command=self.stop)
         self.buttons = [self.start_btn, self.stop_btn,
                         ttk.Button(self.controls, text="Refresh", command=self.refresh),
                         ttk.Button(self.controls, text="AWS settings", command=self.settings_dialog)]
         for b in self.buttons:
-            b.pack(side="left", padx=(0, 12))
-        ttk.Button(self.controls, text="Logs", command=lambda: os.startfile(APP_DIR)).pack(side="right")
+            b.pack(side="left", padx=(0, px(8)))
+        self.activity_btn = ttk.Button(self.controls, text="Show activity", command=self.toggle_activity)
+        self.activity_btn.pack(side="right")
+        ttk.Button(self.controls, text="Logs", command=lambda: os.startfile(APP_DIR)).pack(side="right", padx=px(8))
 
         # server lifetime and cost, chosen before Start
-        life = ttk.LabelFrame(root, text="Server lifetime and cost", padding=(18, 12, 18, 14))
-        life.pack(fill="x", padx=pad, pady=(0, 12))
-        row = ttk.Frame(life)
-        row.pack(fill="x")
-        ttk.Label(row, text="Delete the server automatically after").pack(side="left")
+        life = card(outer, px)
+        life.pack(fill="x")
+        ttk.Label(life, text="Server lifetime", style="Title.Card.TLabel").pack(anchor="w")
+        row = ttk.Frame(life, style="Card.TFrame")
+        row.pack(fill="x", pady=(px(8), 0))
+        ttk.Label(row, text="Delete the server automatically after", style="Card.TLabel").pack(side="left")
         self.hours = tk.StringVar(value=str(load_settings()["max_hours"]))
-        spin = ttk.Spinbox(row, from_=1, to=MAX_HOURS_LIMIT, width=5, textvariable=self.hours,
-                           command=self.save_hours, justify="center", font=("Segoe UI", 11))
-        spin.pack(side="left", padx=10, ipady=2)
+        spin = ttk.Spinbox(row, from_=1, to=MAX_HOURS_LIMIT, width=4, textvariable=self.hours,
+                           command=self.save_hours, justify="center")
+        spin.pack(side="left", padx=px(8))
         spin.bind("<FocusOut>", lambda e: self.save_hours())
         spin.bind("<Return>", lambda e: self.save_hours())
-        ttk.Label(row, text="hours, even if you never press Stop.").pack(side="left")
+        ttk.Label(row, text="hours, even if you never press Stop.", style="Card.TLabel").pack(side="left")
         self.cost = tk.StringVar(value=cost_text(clamp_hours(self.hours.get())))
-        ttk.Label(life, textvariable=self.cost, foreground="#5f6368", wraplength=780,
-                  justify="left").pack(anchor="w", pady=(10, 0))
+        ttk.Label(life, textvariable=self.cost, style="Muted.Card.TLabel", wraplength=px(680),
+                  justify="left").pack(anchor="w", pady=(px(8), 0))
         self.hours.trace_add("write", lambda *a: self.cost.set(cost_text(clamp_hours(self.hours.get()))))
 
-        # activity log
-        act = ttk.LabelFrame(root, text="Activity", padding=(10, 8, 10, 10))
-        act.pack(fill="both", expand=True, padx=pad, pady=(0, pad))
-        self.out = scrolledtext.ScrolledText(act, height=10, font=("Consolas", 10), state="disabled",
-                                             relief="flat", borderwidth=0, padx=8, pady=6)
+        # activity log, folded away until asked for
+        self.activity = card(outer, px)
+        self.out = scrolledtext.ScrolledText(self.activity, height=9, font=("Consolas", 10), state="disabled",
+                                             relief="flat", borderwidth=0, bg=THEME["card"])
         self.out.pack(fill="both", expand=True)
+        fit_to_screen(root, px)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(200, self.pump)
-        root.after(300_000, self.tick)
+        root.after(300_000, self.tick)  # then poll_seconds() decides
         root.after(60_000, self.health)
         if moved:
             self.log(f"Moved your saved {' and '.join(moved)} to {APP_DIR}")
@@ -775,6 +937,15 @@ class App:
         if tag:
             self.log(f"A new version ({tag}) is available: https://github.com/{REPO}/releases/latest")
             self.q.put(("title", f"Proxy on demand {__version__}  -  update available: {tag}"))
+
+    def toggle_activity(self):
+        if self.activity.winfo_ismapped():
+            self.activity.pack_forget()
+            self.activity_btn.config(text="Show activity")
+        else:
+            self.activity.pack(fill="both", expand=True, pady=(self.px(14), 0))
+            self.activity_btn.config(text="Hide activity")
+        self.root.geometry("")  # let the window grow or shrink to its content
 
     def save_hours(self):
         hours = clamp_hours(self.hours.get())
@@ -838,7 +1009,7 @@ class App:
                 done.set()
             elif kind == "done":
                 self.busy, self.steps = False, None
-                self.progress.pack_forget()
+                self.progress.grid_remove()
                 for b in self.buttons:
                     b.config(state="normal")
             else:
@@ -856,7 +1027,7 @@ class App:
             b.config(state="disabled")
         self.steps, self.step_index, self.step_started = steps, 0, time.time()
         self.bar["value"] = 0
-        self.progress.pack(fill="x", before=self.controls)
+        self.progress.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(self.px(14), 0))
         self.status.set(headline)
         self.detail.set("")
         self.dot.config(fg=COLORS["busy"])
@@ -880,13 +1051,57 @@ class App:
                 self.q.put(("done", ""))
         threading.Thread(target=wrapped, daemon=True).start()
 
+    def usage(self, aws, insts=()):
+        """This month's data in bytes, or None if AWS won't say (old IAM policy without CloudWatch read).
+        Running servers the ledger doesn't know (started by an older version) are added, so they count."""
+        known = load_ledger()["instances"]
+        for i in insts:
+            if i["InstanceId"] not in known:
+                record_instance(i["InstanceId"], aws.region, now=i["LaunchTime"])
+        try:
+            return aws.month_usage(load_ledger())
+        except Exception as e:
+            self.log(f"Could not read data usage from CloudWatch: {e}")
+            return None
+
+    def data_warnings(self, used, allow_over, server_gone):
+        """Pop up each warning once a month: 80 %, 95 %, and when the server stopped itself at the limit."""
+        ledger = load_ledger()
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        warned = ledger["warned"].get(month, [])
+        new = due_warnings(used, warned)
+        capped = (server_gone and not allow_over and used is not None and used >= CAP_BYTES - 50 * 10**6
+                  and "cap" not in warned)
+        for t in new:
+            self.q.put(("warn", (
+                f"You have used {gb(used)} of this month's free 100 GB of data ({int(t * 100)} %).\n\n"
+                + ("Going over is allowed in AWS settings, so your server keeps running. Data beyond 100 GB costs "
+                   "about $0.09-0.11 per GB." if allow_over else
+                   f"When it reaches 99.99 GB your server stops itself, so you are not charged for data. You have "
+                   f"{gb(max(0, CAP_BYTES - used))} left.")
+                + "\n\nThe free 100 GB resets on the 1st of each month (UTC). It is shared with anything else on "
+                  "your AWS account that sends data to the internet.")))
+        if capped:
+            self.q.put(("warn", "Your server stopped itself: this month's free 100 GB of data is used up.\n\n"
+                                "This keeps you from being charged for data. You can start again on the 1st of next "
+                                "month (UTC), or tick \"Allow going over the free 100 GB\" in AWS settings if you "
+                                "accept paying about $0.09-0.11 per GB beyond it."))
+        if new or capped:
+            ledger["warned"][month] = warned + new + (["cap"] if capped else [])
+            save_ledger(ledger)
+        return capped
+
     def report(self, aws):
         insts = aws.instances()
         tunnel = singbox_running()
         self.server_up = bool(insts)
+        allow_over = load_settings()["allow_over"]
+        self.data_used = self.usage(aws, insts)
+        data = data_text(self.data_used, allow_over)
+        capped = self.data_warnings(self.data_used, allow_over, server_gone=not insts)
         if insts:
             i = insts[0]
-            up = uptime_text(i["LaunchTime"], server_hours(i))
+            up = uptime_text(i["LaunchTime"], server_hours(i)) + "\n" + data
             ip = i.get("PublicIpAddress", "no IP yet")
             if tunnel and not self.connected_ip:  # app was closed while connected: pick the connection up
                 try:
@@ -910,10 +1125,14 @@ class App:
             self.log("The tunnel was still running but its server is gone (it probably auto-deleted), "
                      "so the tunnel was stopped to restore your normal internet.")
             self.set_status("Not connected", "idle", "Your server had been deleted, so the leftover tunnel "
-                            "was stopped. Nothing is billing.")
+                            "was stopped. Nothing is billing.\n" + data)
         else:
             self.connected_ip = None
-            self.set_status("Not connected", "idle", "Nothing is running on AWS, so nothing is billing.")
+            self.set_status("Not connected", "idle", "Nothing is running on AWS, so nothing is billing.\n" + data)
+        if capped:
+            self.set_status("Stopped: this month's free 100 GB of data is used up", "warn",
+                            "Your server stopped itself so you aren't charged for data. Start works again on the 1st "
+                            "(UTC), or allow going over in AWS settings.\n" + data)
         self.q.put(("start_label", "Reconnect" if insts else "Start"))
         self.first_check = False
 
@@ -1002,6 +1221,13 @@ class App:
             "Leave both key fields empty to keep the key already saved.\n"
             "The key is stored encrypted for your Windows account and is never shown again.")
         ).grid(row=6, column=0, columnspan=2, sticky="w", padx=10)
+        over = tk.BooleanVar(value=s["allow_over"])
+        tk.Checkbutton(w, text="Allow going over the free 100 GB of data a month", variable=over
+                       ).grid(row=7, column=0, columnspan=2, sticky="w", padx=6, pady=(12, 0))
+        tk.Label(w, fg="gray", justify="left", text=(
+            "Off (recommended): a server stops itself at 99.99 GB of data this month, so data never costs you\n"
+            "anything; Start is blocked until the 1st. On: no data limit; beyond 100 GB you pay about $0.09-0.11 per GB.")
+        ).grid(row=8, column=0, columnspan=2, sticky="w", padx=26)
 
         def region_ok():
             region = fields["region"].get().strip()
@@ -1093,20 +1319,20 @@ class App:
                     return
                 save_key(record)
                 self.log(f"AWS key saved, encrypted (user {record['user_arn'].split('/')[-1]})")
-            save_settings({"mfa": mfa.get(), "region": region, "ssm_role": role})
+            save_settings({"mfa": mfa.get(), "region": region, "ssm_role": role, "allow_over": over.get()})
             self.session = None  # settings or key changed: sign in again
             w.destroy()
             self.refresh()  # signs in (with the MFA code if enabled) and proves the whole setup works
 
         bar = tk.Frame(w)
-        bar.grid(row=7, column=0, columnspan=2, pady=(10, 4))
+        bar.grid(row=9, column=0, columnspan=2, pady=(10, 4))
         tk.Button(bar, text="Copy user policy", command=copy_key_policy).pack(side="left", padx=4)
         role_buttons = [tk.Button(bar, text="Copy role trust policy", command=copy_trust_policy),
                         tk.Button(bar, text="Copy role permissions", command=copy_role_permissions)]
         for b in role_buttons:
             b.pack(side="left", padx=4)
         bar2 = tk.Frame(w)
-        bar2.grid(row=8, column=0, columnspan=2, pady=(4, 10))
+        bar2.grid(row=10, column=0, columnspan=2, pady=(4, 10))
         tk.Button(bar2, text="Save and sign in", command=save).pack(side="left", padx=6)
         tk.Button(bar2, text="Cancel", command=w.destroy).pack(side="left", padx=6)
         update_mode()
@@ -1153,7 +1379,9 @@ class App:
                     self.log(f"Reusing running server {live[0]['InstanceId']}")
                     inst = aws.wait_running(live[0]["InstanceId"])
                 else:
-                    launched = aws.launch(password, sg, subnet, hours)
+                    cap = self.data_allowance(aws)
+                    launched = aws.launch(password, sg, subnet, hours, cap)
+                    record_instance(launched, aws.region)  # counted toward the month even if it fails later
                     inst = aws.wait_running(launched)
                 ip = inst["PublicIpAddress"]
                 self.step("boot")
@@ -1198,6 +1426,27 @@ class App:
                                  "Press Reconnect."))
         self.run(job, START_STEPS, "Reconnecting..." if self.server_up else "Starting...")
 
+    def data_allowance(self, aws):
+        """Bytes the new server may send before it stops itself (0 = no limit, the user allowed going over)."""
+        if load_settings()["allow_over"]:
+            self.log("No data limit on this server: going over the free 100 GB is allowed in AWS settings")
+            return 0
+        used = self.usage(aws)
+        if used is None:
+            raise RuntimeError(
+                "The app can't read this month's data usage, so it can't guarantee the server stops before the free "
+                "100 GB.\n\nUpdate your IAM policy: AWS settings > Copy role permissions (or Copy user policy if MFA "
+                "is off), then in the AWS console replace the proxy-on-demand-ec2 policy's JSON with it. "
+                "Or tick \"Allow going over the free 100 GB\" in AWS settings.")
+        left = CAP_BYTES - int(used)
+        if left < 200 * 10**6:
+            raise RuntimeError(
+                f"This month's free 100 GB of data is used up ({gb(used)} so far), so Start is blocked to keep you "
+                "from being charged.\n\nIt resets on the 1st of next month (UTC). To start anyway, tick \"Allow going "
+                "over the free 100 GB\" in AWS settings (data beyond it costs about $0.09-0.11 per GB).")
+        self.log(f"This server may send {gb(left)} more this month; it stops itself at the limit")
+        return left
+
     def stop(self):
         def job():
             self.step("disconnect")
@@ -1222,15 +1471,16 @@ class App:
         self.run(job, STOP_STEPS, "Stopping...")
 
     def tick(self):
-        """While a server exists, refresh the status (uptime and cost) every 5 minutes."""
+        """While a server exists, refresh uptime, cost and data: every 15 min, every 5 min near the data limit.
+        (The limit itself is enforced by the server every 5 seconds, even with the app closed.)"""
         if self.server_up and not self.busy:
             if self.session_valid():  # never pop up an MFA prompt from a background timer
                 self.refresh()
             else:
                 self.set_status("Signed out (the 1-hour sign-in ended)", "warn",
                                 "Your server may still be running and billing. Press Refresh to sign in "
-                                "and check, or Stop to end it.")
-        self.root.after(300_000, self.tick)
+                                "and check, or Stop to end it. Its data limit still applies.")
+        self.root.after(poll_seconds(self.data_used, load_settings()["allow_over"]) * 1000, self.tick)
 
     def on_close(self):
         if self.busy:
@@ -1319,6 +1569,10 @@ if __name__ == "__main__":
     if "--check" in sys.argv:
         sys.exit(self_check())
     ensure_admin()
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # crisp text instead of Windows blurring a stretched window
+    except (AttributeError, OSError):
+        pass
     if already_running():
         messagebox.showinfo("Proxy on demand", "Proxy on demand is already open. Use the window that is open.")
         sys.exit(0)

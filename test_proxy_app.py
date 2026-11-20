@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 
 import proxy_app as app
+REAL = {n: getattr(app, n) for n in ("record_instance", "load_ledger", "save_ledger")}  # before fakes replace them
 
 # set_server changes only ss-out.server, keeps a backup, writes no BOM
 d = tempfile.mkdtemp()
@@ -120,7 +121,7 @@ sf = os.path.join(d, "s", "settings.json")
 assert app.load_settings(sf) == app.DEFAULT_SETTINGS  # missing file -> defaults
 assert app.DEFAULT_SETTINGS["mfa"] is True, "MFA must be on unless the user opts out"
 app.save_settings({"region": "eu-west-1", "ssm_role": "R"}, sf)  # file from before the MFA option existed
-assert app.load_settings(sf) == {"mfa": True, "region": "eu-west-1", "ssm_role": "R", "max_hours": 12}
+assert app.load_settings(sf) == {"mfa": True, "region": "eu-west-1", "ssm_role": "R", "max_hours": 12, "allow_over": False}
 app.save_settings({"mfa": False, "region": "eu-west-1", "ssm_role": ""}, sf)
 assert app.load_settings(sf)["mfa"] is False
 open(sf, "w").write("{broken")
@@ -273,9 +274,11 @@ class FakeAws:
     def security_group(self, vpc): return "sg-1"
     def allow_only(self, sg, ip): pass
     def instances(self): return [i for i in self.insts if i["InstanceId"] not in self.terminated]
-    def launch(self, pw, sg, subnet, hours=12):
+    used = 0
+    def month_usage(self, ledger): return self.used
+    def launch(self, pw, sg, subnet, hours=12, cap_bytes=0):
         self.launched.append("i-new")
-        self.launch_hours = hours
+        self.launch_hours, self.launch_cap = hours, cap_bytes
         self.insts.append({"InstanceId": "i-new", "State": {"Name": "pending"}, "LaunchTime": now})
         return "i-new"
     def wait_running(self, iid): return {"InstanceId": iid, "PublicIpAddress": "5.6.7.8", "LaunchTime": now}
@@ -293,7 +296,13 @@ def fake_app(aws):
     a.log = lambda m: None
     a.save_hours = lambda: None
     a.run = lambda job, steps, headline: job()  # synchronous, exceptions propagate
-    app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5}
+    app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
+                                           "allow_over": False}
+    mem = {"instances": {}, "warned": {}}
+    app.load_ledger = lambda path=None: json.loads(json.dumps(mem))
+    app.save_ledger = lambda ledger, path=None: mem.update(ledger)
+    app.record_instance = lambda iid, region, path=None, now=None: mem["instances"].update({iid: {"region": region}})
+    a.ledger = mem
     a.aws = lambda: aws
     for name, fn in {"find_singbox": lambda: "sing-box.exe", "ensure_config": lambda: False,
                      "load_config": lambda: {"outbounds": [{"tag": "ss-out", "password": "pw"}]},
@@ -433,6 +442,102 @@ ud = app.user_data("x")
 assert "linux-musl" in ud and "linux-gnu" not in ud, "the -gnu build crash-loops on Amazon Linux 2023 (glibc too old)"
 assert ud.index("ssserver --version") < ud.index("systemctl enable")
 assert ud.index("ss -ltn") < ud.index("echo SS-SETUP-DONE") and "SS-SETUP-FAILED" in ud
+
+# ---- monthly data cap ----
+# server script: the cap service is installed with the exact byte limit, before anything else can fail
+ud_cap = app.user_data("x", 12, 12_345_678_901)
+assert "data-cap.sh" in ud_cap and "-ge 12345678901 ]" in ud_cap and "systemctl enable --now data-cap" in ud_cap
+assert ud_cap.index("enable --now data-cap") < ud_cap.index("curl "), "cap must be active before setup can fail"
+assert "data-cap" not in app.user_data("x", 12, 0), "no cap when going over is allowed"
+r = subprocess.run([bash, "-n"], input=ud_cap.encode(), capture_output=True)
+assert r.returncode == 0, r.stderr
+assert "cloudwatch:GetMetricStatistics" in json.dumps(app.iam_policy("ap-south-1"))
+
+# month_usage: sums this month's hourly NetworkOut of the app's servers in this region, deleted ones included
+class FakeCW:
+    def __init__(self): self.calls = []
+    def get_metric_statistics(self, **k):
+        self.calls.append((k["Dimensions"][0]["Value"], k["StartTime"]))
+        return {"Datapoints": [{"Sum": 2e9}, {"Sum": 1e9}]}
+u = app.Aws.__new__(app.Aws)
+u.region, u.cw = "ap-south-1", FakeCW()
+nov = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+ledger = {"instances": {
+    "i-this-month": {"region": "ap-south-1", "launched": "2026-11-05T10:00:00+00:00"},
+    "i-crossed-midnight": {"region": "ap-south-1", "launched": "2026-10-31T20:00:00+00:00"},
+    "i-last-month": {"region": "ap-south-1", "launched": "2026-10-10T10:00:00+00:00"},
+    "i-other-region": {"region": "eu-west-1", "launched": "2026-11-06T10:00:00+00:00"}}, "warned": {}}
+assert u.month_usage(ledger, nov) == 6e9
+assert sorted(c[0] for c in u.cw.calls) == ["i-crossed-midnight", "i-this-month"]
+assert all(c[1] == datetime(2026, 11, 1, tzinfo=timezone.utc) for c in u.cw.calls), "count from the 1st (UTC)"
+class DeniedCW:
+    def get_metric_statistics(self, **k): raise RuntimeError("AccessDenied")
+u.cw = DeniedCW()
+try:
+    u.month_usage({"instances": {}, "warned": {}}, nov); raise AssertionError("empty ledger must still test access")
+except RuntimeError:
+    pass
+
+# ledger: records servers, forgets ones older than CloudWatch keeps
+d = tempfile.mkdtemp()
+lf = os.path.join(d, "usage.json")
+open(lf, "w").write(json.dumps({"instances": {"i-old": {"region": "r", "launched": "2026-01-01T00:00:00+00:00"}},
+                                "warned": {"2026-11": [0.8]}}))
+app.load_ledger, app.save_ledger = REAL["load_ledger"], REAL["save_ledger"]
+REAL["record_instance"]("i-new", "ap-south-1", lf, nov)
+saved = REAL["load_ledger"](lf)
+assert list(saved["instances"]) == ["i-new"] and saved["warned"] == {"2026-11": [0.8]}
+assert REAL["load_ledger"](os.path.join(d, "missing.json")) == {"instances": {}, "warned": {}}
+shutil.rmtree(d)
+
+# thresholds and refresh rate
+GB = 10**9
+assert app.due_warnings(79 * GB, []) == [] and app.due_warnings(81 * GB, []) == [0.8]
+assert app.due_warnings(96 * GB, [0.8]) == [0.95] and app.due_warnings(96 * GB, [0.8, 0.95]) == []
+assert app.due_warnings(None, []) == []
+assert app.poll_seconds(10 * GB, False) == 900 and app.poll_seconds(92 * GB, False) == 300
+assert app.poll_seconds(92 * GB, True) == 900, "no need to hurry when there's no cap"
+assert "12.3 GB of the free 100 GB" in app.data_text(12.3 * GB, False) and "87.7 GB left" in app.data_text(12.3 * GB, False)
+assert "IAM policy" in app.data_text(None, False)
+
+# Start passes the remaining allowance to the new server; refuses when it can't measure or nothing is left
+aws = FakeAws()
+a = fake_app(aws)
+app.singbox_running = lambda: True
+aws.used = 40 * GB
+a.start()
+assert aws.launch_cap == app.CAP_BYTES - 40 * GB and "i-new" in a.ledger["instances"]
+app.singbox_running = lambda: False
+for used, words in ((None, "can't read"), (99.9 * GB, "used up")):
+    aws = FakeAws(); a = fake_app(aws); aws.used = used
+    try:
+        a.start(); raise AssertionError("must refuse to start")
+    except RuntimeError as e:
+        assert words in str(e) and aws.launched == [], (words, str(e))
+aws = FakeAws(); a = fake_app(aws); aws.used = 99.9 * GB
+app.load_settings = lambda path=None: {"mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
+                                       "allow_over": True}
+app.singbox_running = lambda: True
+a.start()
+assert aws.launch_cap == 0, "going over allowed: no cap on the server"
+app.singbox_running = lambda: False
+
+# a running server started by an older version (not in the ledger) is added, so its data counts
+aws = FakeAws([{"InstanceId": "i-legacy", "State": {"Name": "running"}, "LaunchTime": now}])
+a = fake_app(aws)
+a.report(aws)
+assert "i-legacy" in a.ledger["instances"]
+
+# warnings pop up once a month; a server that stopped itself at the limit is explained
+aws = FakeAws(); a = fake_app(aws); aws.used = 96 * GB
+a.report(aws); first = [m for k, m in kinds(a) if k == "warn"]
+a.report(aws); second = [m for k, m in kinds(a) if k == "warn"]
+assert len(first) == 2 and "80 %" in first[0] and "95 %" in first[1] and second == [], (first, second)
+aws.used = app.CAP_BYTES
+a.report(aws)
+msgs = kinds(a)
+assert any(k == "warn" and "stopped itself" in m for k, m in msgs)
+assert any(k == "status" and "free 100 GB of data is used up" in m[0] for k, m in msgs)
 
 # versions and the update notice
 assert app.version_tuple("v1.2.10") == (1, 2, 10) and app.version_tuple("1.0.0") == (1, 0, 0)
