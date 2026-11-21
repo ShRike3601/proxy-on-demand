@@ -747,6 +747,18 @@ sw.share_var.set(False)
 sw.toggle_sharing()
 assert sw.saved == {"sharing": False} and started == [1], "with a server running, Reconnect applies the firewall"
 app.sharing_agreement = real_agree
+v, calls = tk.BooleanVar(master=root, value=False), []
+s = app.switch(root, v, lambda: calls.append(v.get()), lambda n: n)
+s.flip()
+assert v.get() is True and calls == [True], "the slider flips the value, then calls the handler"
+v.set(False)
+assert s.find_all(), "redraws when the value changes from code"
+m = app.path_map(root, lambda n: n)
+m.place(width=600, height=64)
+root.update()
+for tone in app.COLORS:
+    m.show(tone, "Friend's server")
+assert len(m.find_all()) == 11, "two links, three chips with a dot and a label each"
 root.destroy()
 
 # launch: ask "own server or join" unless something is already running

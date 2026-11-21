@@ -206,7 +206,7 @@ You can let **up to 5 devices at once** (you included) use your server. The peop
 - **You can see their IP address** and which sites they visit (not the content of encrypted pages). Tell them so.
 
 **How it works:**
-1. **Turn it on:** tick **Share my server** at the bottom of the main window. The first time, you tick an agreement covering the points above.
+1. **Turn it on:** turn on the **Share my server** switch at the bottom of the main window. The first time, you tick an agreement covering the points above.
    - While it's on, your server's port 443 accepts connections from **any network**, and the key inside the link is the only lock.
    - If a server is running, the change applies at once (the app reconnects).
 2. **Share the link:** while your server runs, press **Copy share link** and send it privately, never in public chats or posts.

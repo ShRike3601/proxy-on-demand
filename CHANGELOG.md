@@ -2,6 +2,12 @@
 
 All notable changes to this project. Versions follow [Semantic Versioning](https://semver.org/). Each version's section here becomes its GitHub Release notes.
 
+## 1.4.0
+
+- **New look.** A graphite-and-green theme in dark and light. Each screen's main button (Start, Connect with a link) stands out in solid white (dark) or black (light).
+- **Connection map.** The status card shows This laptop → server → Internet, joined by lines: solid green when connected, dotted amber while connecting, red on an error, grey when idle.
+- **Share my server is a slider** instead of a checkbox. Click it or its label, or use Tab and Space.
+
 ## 1.3.0
 
 - **Sharing (simple version).** Let up to 5 devices at once, you included, use your server with one link.

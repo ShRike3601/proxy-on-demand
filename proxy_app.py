@@ -34,7 +34,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from tkinter import font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 REPO = "ShRike3601/proxy-on-demand"  # GitHub repo, for the "new version available" notice
 ROLE_NAME = "proxy-on-demand-role"  # IAM role holding the app's EC2 permissions; assumable only with MFA
 SESSION_SECONDS = 3600              # temporary credentials last 1 hour, in memory only
@@ -497,7 +497,7 @@ WHAT IT IS
 Sharing lets people you trust use your server. They don't need an AWS account: they install Proxy on demand, press "Join a friend" and paste your link. (Any Shadowsocks app, such as sing-box, NekoBox or Shadowrocket, can use the link too.)
 
 TURNING IT ON
-Tick "Share my server" at the bottom of the main window. While it's on, your server accepts connections from any network; the key inside the link is the only lock. Turning it off closes the server to everyone but your own network again.
+Turn on the "Share my server" switch at the bottom of the main window. While it's on, your server accepts connections from any network; the key inside the link is the only lock. Turning it off closes the server to everyone but your own network again.
 
 THE LINK
 Press "Copy share link" and send it privately (not in public chats). It works only while your current server runs: after Stop, or when the server deletes itself, the next server gets a new address and a new link. Reconnect keeps the same server, so the link stays valid.
@@ -1006,17 +1006,19 @@ STOP_STEPS = [("disconnect", "Disconnecting", 3), ("signin", "Signing in to AWS"
 UPDATE_STEPS = [("download", "Downloading the new version", 15), ("install", "Installing it", 6)]
 JOIN_STEPS = [("tunnel", "Connecting to the shared server", 6), ("verify", "Checking the connection", 4)]
 REFRESH_STEPS = [("signin", "Signing in to AWS", 3), ("check", "Checking for running servers", 3)]
-COLORS = {"idle": "#9aa0a6", "busy": "#f29900", "ok": "#188038", "warn": "#e8710a", "error": "#d93025"}
+COLORS = {"idle": "#8e8e93", "busy": "#f5a623", "ok": "#16a34a", "warn": "#e8710a", "error": "#d93025"}
 REGIONS = ["ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1", "eu-west-1", "eu-west-2",
            "eu-central-1", "eu-north-1", "us-east-1", "us-east-2", "us-west-2", "ca-central-1", "sa-east-1",
            "me-central-1", "af-south-1"]  # common choices; any valid region code can be typed in
-THEMES = {
-    "light": {"bg": "#f3f4f6", "card": "#ffffff", "line": "#e1e3e8", "text": "#1f2328", "muted": "#5f6368",
-              "field": "#ffffff", "hover": "#eceef1", "trough": "#e8eaed", "disabled": "#9aa0a6",
-              "accent": "#1a73e8", "accent_hover": "#1765cc", "accent_off": "#a8c7fa", "accent_text": "#ffffff"},
-    "dark": {"bg": "#18191c", "card": "#232428", "line": "#34363c", "text": "#e8eaed", "muted": "#a0a4ab",
-             "field": "#2c2e33", "hover": "#2f3136", "trough": "#34363c", "disabled": "#6b6f76",
-             "accent": "#5b9bf8", "accent_hover": "#76acfa", "accent_off": "#2c4268", "accent_text": "#0b1220"},
+THEMES = {  # graphite and green; primary = the one main button per screen
+    "light": {"bg": "#f4f4f5", "card": "#ffffff", "line": "#e4e4e7", "text": "#18181b", "muted": "#5f5f66",
+              "field": "#f4f4f5", "button": "#ffffff", "hover": "#ececee", "trough": "#e4e4e7", "disabled": "#a1a1aa",
+              "accent": "#15803d", "accent_hover": "#166534", "accent_off": "#bbf7d0", "accent_text": "#ffffff",
+              "primary": "#18181b", "primary_hover": "#3f3f46", "primary_off": "#a1a1aa", "primary_text": "#ffffff"},
+    "dark": {"bg": "#0e0e10", "card": "#1a1a1d", "line": "#2c2c31", "text": "#f4f4f5", "muted": "#9b9ba3",
+             "field": "#242428", "button": "#242428", "hover": "#2c2c31", "trough": "#2c2c31", "disabled": "#5f5f66",
+             "accent": "#5ee38a", "accent_hover": "#86efac", "accent_off": "#1f4d30", "accent_text": "#0b0f0c",
+             "primary": "#f4f4f5", "primary_hover": "#d4d4d8", "primary_off": "#3f3f46", "primary_text": "#0e0e10"},
 }
 THEME = dict(THEMES["light"])  # filled in by style_app() from the user's choice
 
@@ -1076,13 +1078,14 @@ def style_app(root, px, theme="system"):
     s.configure("Muted.Card.TLabel", background=t["card"], foreground=t["muted"])
     s.configure("Head.Card.TLabel", background=t["card"], font=("Segoe UI", 16, "bold"))
     s.configure("Title.Card.TLabel", background=t["card"], font=("Segoe UI", 11, "bold"))
-    s.configure("TButton", background=t["card"], padding=(px(16), px(8)), relief="flat")
+    s.configure("TButton", background=t["button"], bordercolor=t["line"], lightcolor=t["button"],
+                darkcolor=t["button"], padding=(px(16), px(8)), relief="flat")
     s.map("TButton", background=[("disabled", t["bg"]), ("active", t["hover"])],
           foreground=[("disabled", t["disabled"])])
-    s.configure("Accent.TButton", background=t["accent"], foreground=t["accent_text"], bordercolor=t["accent"],
-                lightcolor=t["accent"], darkcolor=t["accent"], font=("Segoe UI", 11, "bold"), padding=(px(26), px(8)))
-    s.map("Accent.TButton", background=[("disabled", t["accent_off"]), ("active", t["accent_hover"])],
-          foreground=[("disabled", t["accent_text"])])
+    s.configure("Accent.TButton", background=t["primary"], foreground=t["primary_text"], bordercolor=t["primary"],
+                lightcolor=t["primary"], darkcolor=t["primary"], font=("Segoe UI", 11, "bold"), padding=(px(26), px(8)))
+    s.map("Accent.TButton", background=[("disabled", t["primary_off"]), ("active", t["primary_hover"])],
+          foreground=[("disabled", t["primary_text"])])
     s.configure("Horizontal.TProgressbar", background=t["accent"], troughcolor=t["trough"], bordercolor=t["trough"],
                 lightcolor=t["accent"], darkcolor=t["accent"], thickness=px(10))
     for field in ("TSpinbox", "TEntry", "TCombobox"):
@@ -1182,6 +1185,81 @@ def sharing_agreement(parent, px):
     return result["ok"]
 
 
+def switch(parent, var, command, px):
+    """On/off slider (ttk has none). Click, Space or Enter flips var, then calls command."""
+    w, h = px(46), px(24)
+    c = tk.Canvas(parent, width=w, height=h, highlightthickness=0, bd=0, cursor="hand2", takefocus=1)
+
+    def draw(*_):
+        t, on, r = THEME, var.get(), h // 2
+        c.delete("all")
+        c.config(bg=t["card"])
+        c.create_line(r, r, w - r, r, width=h - 2, capstyle="round", fill=t["accent"] if on else t["muted"])
+        x = w - r if on else r
+        ring = t["text"] if c.focus_get() is c else "#ffffff"  # visible keyboard focus
+        c.create_oval(x - r + 3, 3, x + r - 3, h - 3, fill="#ffffff", outline=ring, width=2)
+
+    def flip(_=None):
+        var.set(not var.get())
+        command()
+
+    var.trace_add("write", draw)
+    for ev in ("<Button-1>", "<space>", "<Return>"):
+        c.bind(ev, flip)
+    c.bind("<FocusIn>", draw)
+    c.bind("<FocusOut>", draw)
+    c.draw, c.flip = draw, flip
+    draw()
+    return c
+
+
+def rounded(c, x1, y1, x2, y2, r, **kw):
+    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r,
+           x1, y1 + r, x1, y1]
+    return c.create_polygon(pts, smooth=True, **kw)
+
+
+def path_map(parent, px):
+    """Live map of the connection: This laptop -> server -> Internet, as chips joined by curves.
+    show(tone, server_label) redraws it; the links take the status colour (grey idle, amber busy, green ok)."""
+    h = px(64)
+    c = tk.Canvas(parent, height=h, highlightthickness=0, bd=0)
+    font = tkfont.Font(family="Segoe UI", size=10)
+    state = {"tone": "idle", "server": "Your server"}
+
+    def draw(*_):
+        t, tone = THEME, state["tone"]
+        c.delete("all")
+        c.config(bg=t["card"])
+        w, pad, dot = c.winfo_width(), px(12), px(8)
+        if w < px(200):
+            return
+        labels = ["This laptop", state["server"], "Internet"]
+        widths = [font.measure(x) + 2 * pad + dot + px(8) for x in labels]
+        ch, ys = px(30), [px(4), h - px(34), px(4)]  # the middle chip sits lower, so the links curve
+        xs = [1, (w - widths[1]) // 2, w - widths[2] - 1]
+        color = COLORS[tone]
+        for i in (0, 1):
+            ax, ay = xs[i] + widths[i], ys[i] + ch // 2
+            bx, by = xs[i + 1], ys[i + 1] + ch // 2
+            mid = (ax + bx) / 2
+            c.create_line(ax, ay, mid, ay, mid, by, bx, by, smooth=True, width=2, fill=color,
+                          dash=() if tone == "ok" else (4, 4))
+        for x, y, wd, label in zip(xs, ys, widths, labels):
+            rounded(c, x, y, x + wd, y + ch, px(10), fill=t["field"], outline=t["line"])
+            cy = y + ch // 2
+            c.create_oval(x + pad, cy - dot // 2, x + pad + dot, cy + dot // 2, fill=color, outline="")
+            c.create_text(x + pad + dot + px(8), cy, text=label, anchor="w", font=font, fill=t["text"])
+
+    def show(tone=None, server=None):
+        state.update({k: v for k, v in (("tone", tone), ("server", server)) if v})
+        draw()
+
+    c.bind("<Configure>", draw)
+    c.show, c.draw = show, draw
+    return c
+
+
 def card(parent, px):
     """A white panel with a hairline border."""
     return tk.Frame(parent, bg=THEME["card"], highlightthickness=1, highlightbackground=THEME["line"],
@@ -1248,6 +1326,8 @@ class App:
         self.theme_btn = ttk.Button(corner, text=theme_label(), style="Link.TButton", command=self.toggle_theme)
         self.theme_btn.pack(side="left")
         status.columnconfigure(1, weight=1)
+        self.path = path_map(status, px)
+        self.path.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(px(14), 0))
         self.progress = ttk.Frame(status, style="Card.TFrame")  # gridded by run(), hidden by "done"
         self.bar = ttk.Progressbar(self.progress, mode="determinate", maximum=1000)
         self.bar.pack(fill="x")
@@ -1278,8 +1358,11 @@ class App:
         ttk.Label(head, textvariable=self.share_head, style="Title.Card.TLabel").pack(side="left")
         ttk.Button(head, text="How sharing works", style="Link.TButton", command=self.sharing_help).pack(side="right")
         self.share_var = tk.BooleanVar(value=load_settings()["sharing"])
-        ttk.Checkbutton(head, text="Share my server", variable=self.share_var, style="Card.TCheckbutton",
-                        command=self.toggle_sharing).pack(side="right", padx=(0, px(16)))
+        self.share_switch = switch(head, self.share_var, self.toggle_sharing, px)
+        self.share_switch.pack(side="right", padx=(0, px(16)))
+        lbl = ttk.Label(head, text="Share my server", style="Card.TLabel", cursor="hand2")
+        lbl.pack(side="right", padx=(0, px(8)))
+        lbl.bind("<Button-1>", self.share_switch.flip)
         self.copy_btn = ttk.Button(head, text="Copy share link", style="Outline.TButton", command=self.copy_share_link)
         ttk.Label(share, textvariable=self.share_text, style="Muted.Card.TLabel", wraplength=px(640),
                   justify="left").pack(anchor="w", pady=(px(6), 0))
@@ -1423,6 +1506,8 @@ class App:
         for c in self.cards:
             c.config(bg=THEME["card"], highlightbackground=THEME["line"])
         self.dot.config(bg=THEME["card"])
+        self.share_switch.draw()
+        self.path.draw()
         self.out.config(bg=THEME["card"], fg=THEME["text"], insertbackground=THEME["text"])
         self.theme_btn.config(text=theme_label())
         dark_title_bar(self.root)
@@ -1439,7 +1524,7 @@ class App:
                                 "your IP address and which sites you visit. Press Stop to disconnect.")
         elif st == "off":
             self.share_head.set("Sharing is off")
-            self.share_text.set("Only this laptop can use your server. To let people you trust use it, tick "
+            self.share_text.set("Only this laptop can use your server. To let people you trust use it, turn on "
                                 "Share my server.")
         elif not info.get("server"):
             self.share_head.set("Sharing is on")
@@ -1587,6 +1672,7 @@ class App:
         else:
             show.pack(fill="x")
         self.mode_btn.config(text="Use a friend's server instead" if mode == "own" else "Run my own server instead")
+        self.path.show(server="Your server" if mode == "own" else "Friend's server")
         self.root.geometry("")
 
     def switch_mode(self):
@@ -1660,6 +1746,7 @@ class App:
                 self.status.set(headline)
                 self.detail.set(detail)
                 self.dot.config(fg=COLORS[tone])
+                self.path.show(tone)
             elif kind == "step":
                 keys = [s[0] for s in self.steps or []]
                 if msg in keys:
@@ -1709,6 +1796,7 @@ class App:
         self.status.set(headline)
         self.detail.set("")
         self.dot.config(fg=COLORS["busy"])
+        self.path.show("busy")
         self.animate()
 
         def wrapped():
