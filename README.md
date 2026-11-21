@@ -7,6 +7,21 @@ A one-click Windows app that runs your own private Shadowsocks proxy on **your o
 
 No SSH, no Linux commands. The app creates and remembers the proxy password for you, and keeps you inside AWS's free 100 GB of data a month unless you allow more.
 
+![Connected to your own server, sharing with one other device](docs/own-dark.png)
+
+<table>
+  <tr>
+    <td><img src="docs/choice.png" alt="On launch: run your own server or join a friend's"></td>
+    <td><img src="docs/own-light.png" alt="Not connected, light theme: nothing is billing"></td>
+    <td><img src="docs/join-dark.png" alt="Connected to a friend's server"></td>
+  </tr>
+  <tr>
+    <td align="center">Pick a screen on launch</td>
+    <td align="center">Idle: nothing is billing</td>
+    <td align="center">On a friend's server</td>
+  </tr>
+</table>
+
 ---
 
 ## Quick Start
