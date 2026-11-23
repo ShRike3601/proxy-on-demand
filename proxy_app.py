@@ -32,7 +32,7 @@ import webbrowser
 import zipfile
 from datetime import datetime, timedelta, timezone
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 REPO = "ShRike3601/proxy-on-demand"  # GitHub repo, for the "new version available" notice
 ROLE_NAME = "proxy-on-demand-role"  # IAM role holding the app's EC2 permissions; assumable only with MFA
 SESSION_SECONDS = 3600              # temporary credentials last 1 hour, in memory only
@@ -1705,9 +1705,11 @@ class App:
                                   "then share it only with people you trust.")
         self.show_sharing(info)
         self.emit("start_label", "Reconnect" if insts else "Start")
-        if self.server_ip and tunnel and self.connected_ip:
-            self.check = {"at": time.time(), "tunnel": True, "server_ms": tcp_ms(self.server_ip), "exit_ok": True}
-        elif not insts:
+        if self.server_ip:  # every Refresh measures the ping, connected or not
+            connected = bool(tunnel and self.connected_ip)
+            self.check = {"at": time.time(), "tunnel": connected, "server_ms": tcp_ms(self.server_ip),
+                          "exit_ok": connected}
+        else:
             self.check = {}
         self.emit("route", self.route())
         self.first_check = False
@@ -1725,11 +1727,11 @@ class App:
         ms = c.get("server_ms")
         if self.joined:
             server = {"name": "Friend's server", "state": "ok" if ms is not None else "error",
-                      "lines": [self.joined, f"{ms} ms away" if ms is not None else "Not reachable from here"]}
+                      "lines": [self.joined, f"Ping {ms} ms" if ms is not None else "Not reachable from here"]}
         elif self.server:
             s = self.server
             left = max(0.0, s["hours"] - (datetime.now(timezone.utc) - s["launched"]).total_seconds() / 3600)
-            reach = (f"{ms} ms away" if ms is not None else
+            reach = (f"ping {ms} ms" if ms is not None else
                      "Not reachable from this network" if c.get("at") else "Not checked yet")
             server = {"name": "Your server", "state": "error" if c.get("at") and ms is None else "ok",
                       "lines": [f"{REGION_NAMES.get(s['region'], s['region'])} · {s['size']}",

@@ -816,6 +816,14 @@ route = rt.route()
 assert route["server"]["state"] == "error" and route["internet"]["state"] == "error"
 assert json.loads(json.dumps(route)) == route and app.device_name() in ("This laptop", "This PC")
 
+# Refresh measures the ping to the server even when this device isn't connected to it
+pg = FakeAws([{"InstanceId": "i-p", "State": {"Name": "running"}, "LaunchTime": datetime.now(timezone.utc),
+               "PublicIpAddress": "5.6.7.8"}])
+pa = fake_app(pg)
+pa.report(pg)
+assert pa.check["server_ms"] == 30 and "ping 30 ms" in pa.route()["server"]["lines"][1]
+assert not pa.check["exit_ok"], "not connected: the internet hop doesn't claim the tunnel works"
+
 # the page: every call it makes exists on the Bridge, and nothing of the App is reachable from it
 page_js = open(os.path.join(here, "ui", "app.js"), encoding="utf-8").read()
 page_calls = set(re.findall(r"api\(\)\.(\w+)\(", page_js)) | set(re.findall(r"\ba\.(\w+)\(", page_js))

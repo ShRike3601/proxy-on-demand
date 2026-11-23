@@ -2,6 +2,11 @@
 
 All notable changes to this project. Versions follow [Semantic Versioning](https://semver.org/). Each version's section here becomes its GitHub Release notes.
 
+## 2.0.1
+
+- **Ping on every Refresh.** The route's server step shows how long your server takes to answer (for example "ping 41 ms"), measured on every Refresh, even when this device isn't connected, and every minute while connected. A friend's server shows its ping too.
+- README screenshots show the 2.0 window.
+
 ## 2.0.0
 
 - **A new window.** Rebuilt as a modern page shown by Windows' own Edge engine (WebView2), still started with `Start Proxy App.bat` and Python, so it works with Smart App Control on.
