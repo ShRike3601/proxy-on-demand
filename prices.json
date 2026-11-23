@@ -1,0 +1,156 @@
+{
+ "updated": "2026-11-23",
+ "source": "aws.amazon.com public price list",
+ "regions": {
+  "ap-south-1": {
+   "server": {
+    "t3.micro": 0.0112,
+    "t3.small": 0.0224,
+    "t3.medium": 0.0448
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.0912,
+   "data_out_gb": 0.1093
+  },
+  "ap-southeast-1": {
+   "server": {
+    "t3.micro": 0.0132,
+    "t3.small": 0.0264,
+    "t3.medium": 0.0528
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.096,
+   "data_out_gb": 0.12
+  },
+  "ap-southeast-2": {
+   "server": {
+    "t3.micro": 0.0132,
+    "t3.small": 0.0264,
+    "t3.medium": 0.0528
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.096,
+   "data_out_gb": 0.114
+  },
+  "ap-northeast-1": {
+   "server": {
+    "t3.micro": 0.0136,
+    "t3.small": 0.0272,
+    "t3.medium": 0.0544
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.096,
+   "data_out_gb": 0.114
+  },
+  "eu-west-1": {
+   "server": {
+    "t3.micro": 0.0114,
+    "t3.small": 0.0228,
+    "t3.medium": 0.0456
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.088,
+   "data_out_gb": 0.09
+  },
+  "eu-west-2": {
+   "server": {
+    "t3.micro": 0.0118,
+    "t3.small": 0.0236,
+    "t3.medium": 0.0472
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.0928,
+   "data_out_gb": 0.09
+  },
+  "eu-central-1": {
+   "server": {
+    "t3.micro": 0.012,
+    "t3.small": 0.024,
+    "t3.medium": 0.048
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.0952,
+   "data_out_gb": 0.09
+  },
+  "eu-north-1": {
+   "server": {
+    "t3.micro": 0.0108,
+    "t3.small": 0.0216,
+    "t3.medium": 0.0432
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.0836,
+   "data_out_gb": 0.09
+  },
+  "us-east-1": {
+   "server": {
+    "t3.micro": 0.0104,
+    "t3.small": 0.0208,
+    "t3.medium": 0.0416
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.08,
+   "data_out_gb": 0.09
+  },
+  "us-east-2": {
+   "server": {
+    "t3.micro": 0.0104,
+    "t3.small": 0.0208,
+    "t3.medium": 0.0416
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.08,
+   "data_out_gb": 0.09
+  },
+  "us-west-2": {
+   "server": {
+    "t3.micro": 0.0104,
+    "t3.small": 0.0208,
+    "t3.medium": 0.0416
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.08,
+   "data_out_gb": 0.09
+  },
+  "ca-central-1": {
+   "server": {
+    "t3.micro": 0.0116,
+    "t3.small": 0.0232,
+    "t3.medium": 0.0464
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.088,
+   "data_out_gb": 0.09
+  },
+  "sa-east-1": {
+   "server": {
+    "t3.micro": 0.0168,
+    "t3.small": 0.0336,
+    "t3.medium": 0.0672
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.152,
+   "data_out_gb": 0.15
+  },
+  "me-central-1": {
+   "server": {
+    "t3.micro": 0.0125,
+    "t3.small": 0.0251,
+    "t3.medium": 0.0502
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.0968,
+   "data_out_gb": 0.11
+  },
+  "af-south-1": {
+   "server": {
+    "t3.micro": 0.0136,
+    "t3.small": 0.0271,
+    "t3.medium": 0.0542
+   },
+   "ipv4_hour": 0.005,
+   "gp3_gb_month": 0.1047,
+   "data_out_gb": 0.154
+  }
+ }
+}

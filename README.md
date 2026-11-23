@@ -7,17 +7,17 @@ A one-click Windows app that runs your own private Shadowsocks proxy on **your o
 
 No SSH, no Linux commands. The app creates and remembers the proxy password for you, and keeps you inside AWS's free 100 GB of data a month unless you allow more.
 
-![Connected to your own server, sharing with one other device](docs/own-dark.png)
+![Connected to your own server: the route, this session and this month's cost, data and credits](docs/own-dark.png)
 
 <table>
   <tr>
     <td><img src="docs/choice.png" alt="On launch: run your own server or join a friend's"></td>
-    <td><img src="docs/own-light.png" alt="Not connected, light theme: nothing is billing"></td>
+    <td><img src="docs/usage-dark.png" alt="Cost and data: this month's cost worked out by the app next to AWS's own figure"></td>
     <td><img src="docs/join-dark.png" alt="Connected to a friend's server"></td>
   </tr>
   <tr>
     <td align="center">Pick a screen on launch</td>
-    <td align="center">Idle: nothing is billing</td>
+    <td align="center">Cost and data</td>
     <td align="center">On a friend's server</td>
   </tr>
 </table>
@@ -41,27 +41,21 @@ Follow AWS's official guide: [Create an AWS account](https://docs.aws.amazon.com
 
 Follow [Creating a budget](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-create.html) and choose the **Monthly cost budget** template. Set a small amount such as USD 5 and your email address. AWS will email you if spending heads past it.
 
-### Step 3: Get the app (recommended: run from source)
+### Step 3: Get the app
 
-1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/windows/). During setup, tick **"Add python.exe to PATH"**.
+The only supported way to run the app for now is **from source, with Python 3.11**. This works even with Windows 11's Smart App Control turned on, because Python itself is signed by its publisher.
+
+1. Install **Python 3.11** from the official [python.org Windows downloads](https://www.python.org/downloads/windows/) page (pick the latest 3.11 "Windows installer (64-bit)"). During setup, tick **"Add python.exe to PATH"**.
 2. On this page click **Code → Download ZIP**, and unzip it anywhere, for example a `Proxy on demand` folder on your Desktop (or `git clone` it).
 
-<details>
-<summary>Alternative: the ready-made <code>ProxyOnDemand.exe</code> (no Python, but Windows may block it)</summary>
-
-1. Open the [latest release](../../releases/latest) and download **`ProxyOnDemand.exe`**, plus `ProxyOnDemand.exe.sha256` if you want to verify it: in PowerShell run `Get-FileHash .\ProxyOnDemand.exe` and compare.
-2. The `.exe` isn't code-signed, so Windows doesn't know the publisher:
-   - **"Windows protected your PC"** (SmartScreen): click **More info → Run anyway**.
-   - **"Smart App Control blocked an app"**: Windows 11's Smart App Control doesn't allow unsigned apps at all, and it shouldn't be turned off for this. Run from source instead.
-
-</details>
+> **Don't use `ProxyOnDemand.exe`** from the releases page for now. It isn't code-signed yet, so Smart App Control blocks it completely and SmartScreen warns about it. The `.exe` will become the easy option once it's signed.
 
 ### Step 4: Open the app
 
-1. Double-click **`Start Proxy App.bat`** (or `ProxyOnDemand.exe`). The first run installs the one Python dependency.
-2. Accept the Windows admin prompt. The app needs admin rights to create its network adapter.
+1. In the app's folder, right-click **`Start Proxy App.bat`** and choose **Run as administrator**. The app needs admin rights to create its network adapter. The first run installs the app's Python packages, which takes a minute.
+2. If Windows asks whether to allow the app to make changes, click **Yes**.
 3. The app asks **"How do you want to connect?"**:
-   - **Run my own server:** the rest of this Quick Start. The first time, **Settings** opens on the **AWS access** tab. Choose the **Region** nearest to you, for example `ap-south-1` (Mumbai), `eu-west-2` (London) or `us-east-1` (N. Virginia). See [all region codes](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html). Keep the window open.
+   - **Run my own server:** the rest of this Quick Start. The first time, **Settings** opens. Choose the **Region** nearest to you, for example `ap-south-1` (Mumbai), `eu-west-2` (London) or `us-east-1` (N. Virginia). See [all region codes](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html). Keep the window open.
    - **Join a friend's server:** paste the link they sent you and you're done. You need no AWS account and can skip the rest of this guide. See [Joining a friend's server](#joining-a-friends-server).
 
    The app asks this every time it opens, unless something is already running (then it shows you that instead).
@@ -100,7 +94,7 @@ Also turn on [Cost Anomaly Detection](https://docs.aws.amazon.com/cost-managemen
 
 Press **Start**. A progress bar shows each step and the time left. A fresh server usually takes **about 1–2 minutes**.
 
-On the first Start the app also downloads sing-box, the VPN engine. It's the official release, and the app checks it against a pinned checksum. When you see **"Successfully connected"**, all your traffic goes through your server.
+On the first Start the app also downloads sing-box, the VPN engine. It's the official release, and the app checks it against a pinned checksum. When the headline says **"Connected"** and all three steps of the route are green, all your traffic goes through your server.
 
 **Press Stop when you're done.** The app confirms that nothing is left billing.
 
@@ -125,69 +119,104 @@ With MFA, the stored key alone can do nothing: every sign-in also needs a 6-digi
 
 ### The main window
 
+The window has a slim sidebar on the left and one page at a time on the right. Everything the app has to tell you appears **inside the window**, as a banner at the top of the page: there are no pop-up windows.
+
+**Sidebar:** **Home**, **Cost and data**, **Sharing**, **Activity**. At the bottom: the theme switch (☾/☀) and **Settings** (the gear). An orange dot on the gear means the app needs your attention there.
+
+**Home** has:
+
 | Part | What it tells you |
 |---|---|
-| **Coloured dot and headline** | Grey: not connected, nothing billing. Orange: working. Green: connected. Amber: needs your attention (for example, a server is running but this laptop isn't connected). Red: something went wrong. |
-| **Detail line** | While a server runs: how long it has run, its cost so far, the most it can cost, and when it deletes itself. Always: **how much of this month's free 100 GB of data is used**. |
-| **Progress bar** | Shown while Start, Stop or Refresh runs. It names the current step ("Server is installing Shadowsocks", step 5 of 7) and estimates the time left from typical runs. If a step takes longer than usual, it says so instead of freezing or jumping to 100%. |
-| **Start / Reconnect** | Start creates a server and connects you. While a server exists the button reads **Reconnect** (see below). |
-| **Stop** | Disconnects you first, so your normal internet returns, then deletes the server and checks that nothing is left billing. |
-| **Refresh** | Re-checks AWS and the connection. |
-| **Settings** | Access key and region on the first tab; server size, auto-delete time, data limit, MFA and sharing on the others. See [Settings](#settings). |
-| **Use a friend's server instead / Run my own server instead** (top right) | Switches between the two screens: your own server (Start, Stop, Settings, sharing), or a friend's server (Connect with a link, Disconnect). Each shows only its own buttons. See [Joining a friend's server](#joining-a-friends-server). |
-| **☾ Dark / ☀ Light** (top right) | Switches the theme instantly. The app starts in your Windows theme. |
-| **Sharing** (bottom) | The **Share my server** switch, the share link, and the devices connected right now. See [Sharing your server](#sharing-your-server). |
-| **Logs** | Opens the folder that holds `app.log`. |
-| **Show activity** | Unfolds a log of everything the app does, step by step. The same text is saved in `app.log`. |
+| **Coloured dot and headline** | Grey: not connected, nothing billing. Amber: working. Green: connected. Orange: needs your attention (for example, a server is running but this device isn't connected). Red: something went wrong, with the reason underneath. |
+| **Start / Reconnect, Stop, Refresh** | Start creates a server and connects you; while a server exists the button reads **Reconnect** (see below). Stop disconnects you first, so your normal internet returns, then deletes the server and checks that nothing is left billing. Refresh re-checks AWS and the connection. |
+| **Progress bar** | Shown while Start, Stop or Refresh runs. It names the current step ("Waiting for the server to boot", step 5 of 8) and estimates the time left. If a step takes longer than usual, it says so instead of freezing. |
+| **The route** | **This laptop** (or **This PC**) → **Your server** → **Internet**, each with what the app last checked: whether the tunnel is on; the server's region, size, IP address, response time and when it deletes itself; whether traffic really leaves through the server. A step turns red with the reason when it fails, so you can see where a connection broke. |
+| **This session** | What the running server has cost so far, how long it has run and how long it has left. |
+| **This month** | What the app's servers cost this month, worked out on your PC (see [Seeing the real bill and your credits](#seeing-the-real-bill-and-your-credits)), with AWS's own figure next to it once that's set up. |
+| **Data this month** | How much of AWS's free 100 GB a month is used, and when it resets. |
+| **Credits left** | The AWS credits left on your account, when AWS reports them. |
+| **What a server costs** | The price per hour of each part (server, public IP address, disk) for your region and size, and the most one session can cost. |
+| **Use a friend's server instead / Run my own server instead** | Switches between your own server and a friend's (see [Joining a friend's server](#joining-a-friends-server)). |
 
-The window sizes itself from your screen's scaling setting, so it looks the same on a 1080p laptop, a 1440p screen or a 4K display. Below the buttons, one line says what the next session costs at most; **Change in Settings** opens the options.
+**Activity** shows everything the app does, step by step; **Open logs folder** opens the folder with `app.log`, which holds the same text.
 
 ### Settings
 
-| Tab | What's there |
+Open it with the gear at the bottom of the sidebar.
+
+| Section | What's there |
 |---|---|
-| **AWS access** | Access key, region, and **Copy IAM policy**. All a beginner needs. |
-| **Server & data** | **Size**: Small (`t3.micro`, default), Medium (`t3.small`) or Large (`t3.medium`, for more people at once), with a live estimate of the hourly and per-session cost. **Delete after** 1–24 hours. **Allow going over the free 100 GB** of data a month. |
+| **AWS access** | Access key, region, and **Copy IAM policy**. After copying, the exact steps for the AWS console appear right under the button. |
+| **Server** | **Size**: Small (`t3.micro`, default), Medium (`t3.small`) or Large (`t3.medium`, for more people at once). **Delete after** 1–24 hours. A live line shows the price per hour and the most a session can cost. |
+| **Data** | **Allow going over** the free 100 GB of data a month. |
 | **Security** | Optional MFA, and an optional Session Manager role. |
 
-Approximate prices, Mumbai, for server + public IP + disk:
-- Small: about $0.017/h
-- Medium: about $0.028/h
-- Large: about $0.051/h
+AWS's prices per hour in Mumbai, for server + public IP + disk:
+- Small: $0.0172
+- Medium: $0.0284
+- Large: $0.0508
 
-Other regions differ a little. Data beyond the free 100 GB is extra. The size and auto-delete time apply to the next server you start.
+The app uses AWS's prices for whichever region you choose. Data beyond the free 100 GB is extra. The size and auto-delete time apply to the next server you start.
 
 ### Monthly data limit (free 100 GB)
 
-AWS gives every account **100 GB of outbound data per month free**; beyond that, data costs about USD 0.09–0.11 per GB. Data, not server time, is what can get expensive, especially if several people use one server. So by default the app keeps you inside the free 100 GB:
+AWS gives every account **100 GB of outbound data per month free**; beyond that, data costs about USD 0.09–0.15 per GB depending on the region (Mumbai: $0.1093). Data, not server time, is what can get expensive, especially if several people use one server. So by default the app keeps you inside the free 100 GB:
 
 - **The server enforces it itself.**
   - When you press Start, the app works out how much of this month's 100 GB is left and gives that allowance to the new server.
   - The server checks its own outgoing traffic every 5 seconds and stops itself, which deletes it, at **99.99 GB for the month**.
   - This works even if your laptop is off, asleep or the app is closed.
 - **The app shows and warns.**
-  - The detail line shows "Data this month: x of the free 100 GB, y left".
-  - A warning pops up once at **80 GB** and once at **95 GB**.
+  - The **Data this month** tile shows how much is used, with a bar, and when it resets: the 1st of next month, 00:00 UTC.
+  - A warning appears once at **80 GB** and once at **95 GB**.
   - If a server stopped itself at the limit, the app says so in plain words.
   - Start is then blocked until the **1st of next month (UTC)**, when the free 100 GB resets.
 - **How often it updates:**
   - While a server runs, the window updates every **15 minutes**, and every **5 minutes** once less than 10 GB is left. AWS's traffic figures (CloudWatch) only update every 5 minutes, so checking more often would show nothing new.
   - The stop at the limit doesn't depend on this: the server does it within seconds.
   - **Refresh** updates immediately.
-- **Going over on purpose:** tick **"Allow going over the free 100 GB of data a month"** in **Settings → Server & data**. Servers then have no data limit and keep running until Stop or auto-delete. The warnings still appear, and data beyond 100 GB is billed.
+- **Going over on purpose:** turn on **Allow going over** in **Settings → Data**. Servers then have no data limit and keep running until Stop or auto-delete. The warnings still appear, and data beyond 100 GB is billed.
 
 What it counts:
 - Data sent by the app's servers this calendar month (UTC), including servers that already deleted themselves.
 - "GB" here is 10⁹ bytes. AWS bills by 2³⁰-byte GB, so stopping at 99.99 leaves roughly 7 GB of real slack for measurement delay.
 - The free 100 GB is **shared with everything else on your AWS account** that sends data to the internet, so other use isn't counted here. Your budget alert (Step 2) watches the whole account.
-- Servers started by app versions before 1.1.0 aren't counted for the month they ran.
 
-### Updating your IAM policy (when upgrading from 1.0.0)
+### Seeing the real bill and your credits
 
-Version 1.1.0 needs one extra, read-only permission, `cloudwatch:GetMetricStatistics`, to measure data. Until you add it, the app shows "Data this month: unknown" and refuses to start a capped server.
+The **Cost and data** page (and the tiles on Home) show three figures:
 
-1. In the app open **Settings** and click **Copy IAM policy** on the AWS access tab (with MFA: **Copy role permissions** on the Security tab).
+- **This month, worked out by the app.** Each server's running time this month, times AWS's list prices for its region and size, for the server, its public IP address and its disk (AWS bills them per second), plus any data beyond the free 100 GB. It's calculated on your PC, so **checking it costs nothing**. The prices ship with the app in `prices.json`, taken from AWS's own price list.
+- **AWS's own figure, and its forecast for the month.** The app reads a free [AWS Budgets](https://docs.aws.amazon.com/cost-management/latest/userguide/budgets-managing-costs.html) budget named `proxy-on-demand` that counts only resources tagged `app = ss-proxy-app` (every server and disk the app creates). It creates the budget itself the first time. AWS updates it up to three times a day, and monitoring budgets is free, so the app reads it at most once an hour.
+- **Credits left** on your whole account, read from AWS's free plan (accounts opened from 15 July 2025). On older accounts, or for promotional codes, check **Billing and Cost Management → Credits** in the console instead.
+
+Both money figures are **before credits**: they are the real cost of your usage. Credits then pay it, so you may owe nothing.
+
+The app no longer uses Cost Explorer, which charges $0.01 for every check.
+
+**One-time setup for AWS's figure (then wait a day):**
+
+1. **Activate the tag:** go to **Billing and Cost Management → Cost allocation tags → User-defined cost allocation tags**, tick **`app`**, and click **Activate**. The tag only appears there after the app has started at least one server, and activation takes up to 24 hours. To include earlier costs, click **Backfill tags**. [AWS guide](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/activating-tags.html)
+2. **Update the IAM policy** when the app asks (see below).
+
+Until the tag is active, AWS's figure stays at $0.00. The **Cost and data** page has buttons that open these console pages.
+
+If the app still can't read AWS's figure after updating the policy, the account's root user may need to allow IAM users to see billing: **Account → IAM user and role access to Billing information → Edit → Activate IAM Access**.
+
+**What AWS's figure may leave out:** the server's public IP address (about $0.005 an hour) is billed under VPC, and AWS may not attach the server's tag to it. The app's own figure always includes it.
+
+### Updating your IAM policy
+
+Newer versions sometimes need extra read-only permissions. When the app finds one missing, it shows a bold **Update your IAM policy** banner at the top of the window, with a **Copy updated policy** button and the steps.
+- 1.1.0 added `cloudwatch:GetMetricStatistics`, to measure data. Without it the app can't show your data use and refuses to start a capped server.
+- 2.0.0 adds read access to one AWS Budgets budget (`budgets:ViewBudget` and `budgets:ModifyBudget`, limited to the budget named `proxy-on-demand`) and to your credit balance (`freetier:GetAccountPlanState`). Without them the app shows only its own cost figure; everything else works.
+
+To update:
+
+1. Click **Copy updated policy** in the banner, or in **Settings** click **Copy IAM policy** (with MFA: **Copy role permissions**).
 2. In the AWS console go to IAM → Policies → `proxy-on-demand-ec2` → **Edit** → JSON, replace everything with the copied text, and save.
+
+The budget permissions are limited to that one budget. The credit balance can't be limited this way: the key can **read** (never change) your account's credit balance.
 
 ### Switching networks: Reconnect
 
@@ -205,15 +234,15 @@ Your server only accepts connections from **your network's public IPs**, so movi
 
 ### Auto-delete and cost
 
-Below the buttons, choose **"Delete the server automatically after N hours"** (1 to 24, default 12).
-- It's saved and **applies to the next server you start**. A running server keeps the time it was started with; the detail line always shows the real countdown.
+In **Settings → Server**, choose **Delete after** N hours (1 to 24, default 12).
+- It's saved and **applies to the next server you start**. A running server keeps the time it was started with; the route and the **This session** tile always show the real countdown.
 - The server enforces it itself, so it is deleted even if your laptop is off, asleep or the app has crashed.
 
-The line under it shows the cost of your choice, for example *"about $0.018 per hour, so at most about $0.22 if it runs the full 12 h"*. While a server runs, the detail line shows cost so far and the maximum. These are estimates from Mumbai prices; downloads beyond 100 GB a month cost extra. See [Cost](#cost-approximate).
+The line under it shows the cost of your choice at AWS's prices for your region, for example *"$0.0172 per hour ... At most $0.21 per session"*. While a server runs, the **This session** tile shows the cost so far. Data beyond 100 GB a month costs extra. See [Cost](#cost-approximate).
 
 ### Sharing your server
 
-You can let **up to 5 devices at once** (you included) use your server. The people you share with need no AWS account: they install this app and choose **Join a friend's server**. The app also explains all of this under **How sharing works** (bottom of the main window).
+You can let **up to 5 devices at once** (you included) use your server. The people you share with need no AWS account: they install this app and choose **Join a friend's server**. The **Sharing** page in the sidebar also explains all of this under **How sharing works**.
 
 **Before you start, understand:**
 - **You pay** for everything on your server: its running time and **all the data**. Everyone shares your free 100 GB a month; when it's used up, the server stops for everyone.
@@ -221,12 +250,12 @@ You can let **up to 5 devices at once** (you included) use your server. The peop
 - **You can see their IP address** and which sites they visit (not the content of encrypted pages). Tell them so.
 
 **How it works:**
-1. **Turn it on:** turn on the **Share my server** switch at the bottom of the main window. The first time, you tick an agreement covering the points above.
+1. **Turn it on:** open **Sharing** in the sidebar and turn on the switch. The first time, you tick an agreement covering the points above, right on the page.
    - While it's on, your server's port 443 accepts connections from **any network**, and the key inside the link is the only lock.
    - If a server is running, the change applies at once (the app reconnects).
 2. **Share the link:** while your server runs, press **Copy share link** and send it privately, never in public chats or posts.
-3. **Your friend connects:** they choose **Join a friend's server**, press **Connect with a link** and paste it. Any Shadowsocks app works too: sing-box, NekoBox, Shadowrocket.
-4. **See who is connected:** the bottom of the main window shows "Sharing is on · 2 of 5 devices connected" and lists each device by IP address, with yours marked "(you)".
+3. **Your friend connects:** they choose **Join a friend's server**, paste the link and press **Connect**. Any Shadowsocks app works too: sing-box, NekoBox, Shadowrocket.
+4. **See who is connected:** the **Sharing** page shows "Sharing is on · 2 of 5 devices" and lists each device by IP address, with yours marked "(you)".
    - With one shared link, the server can't tell people apart by name, and two people on the same Wi-Fi count as one.
    - If more than 5 connect, the app warns you, because your link has probably been passed on. (The limit is shown and warned about, not yet enforced by the server.)
 
@@ -240,12 +269,12 @@ You can let **up to 5 devices at once** (you included) use your server. The peop
 
 Then share a fresh link only with the people you still want.
 
-**Leaving the app open?** Closing the window while sharing warns you that anyone using your link is cut off too if you choose to stop.
+**Closing the app?** If your server is running, the app asks inside the window whether to stop it first, and reminds you that anyone using your link is cut off too.
 
 ### Joining a friend's server
 
-1. Open the app and choose **Join a friend's server**, or click **Use a friend's server instead** at the top right. You get a separate, simpler screen: **Connect with a link**, **Disconnect**, **Refresh**.
-2. Press **Connect with a link**, paste the link (it starts with `ss://`) and press **Connect**.
+1. Open the app and choose **Join a friend's server**, or click **Use a friend's server instead** on Home. You get a simpler screen with no AWS buttons.
+2. Paste the link (it starts with `ss://`) and press **Connect**.
 3. **Disconnect** leaves. It never touches anyone's AWS account.
 
 **Before you join:**
@@ -255,11 +284,11 @@ Then share a fresh link only with the people you still want.
 
 ### Light and dark
 
-The app follows Windows' light or dark setting. The **☾ Dark / ☀ Light** switch in the top-right corner changes it instantly for the current session.
+The app follows Windows' light or dark setting. The **☾ / ☀** button at the bottom of the sidebar changes it instantly for the current session.
 
 ### Updating
 
-When a new version is released, the app offers **"Update now?"** when it opens. If you say yes, it:
+When a new version is released, a banner at the top of the window offers **Update now**. If you press it, the app:
 1. downloads the new version from this repository's GitHub Releases;
 2. checks it against the release's published checksum;
 3. replaces the old version in place (no duplicate copies are left behind);
@@ -276,8 +305,8 @@ The app doesn't run in the background. Closing the window ends the app, but **yo
 
 | You close the window... | What keeps running | What you see when you reopen |
 |---|---|---|
-| ...while connected, choosing "No, stay connected" | Server and tunnel. Your traffic keeps going through the server. | **Connected** (green). The app picks up the existing connection; nothing restarts. |
-| ...while connected, choosing "Yes, stop everything" | Nothing. The app runs Stop first, then closes. | **Not connected** (grey). |
+| ...while connected, choosing "Keep it running and close" | Server and tunnel. Your traffic keeps going through the server. | **Connected** (green). The app picks up the existing connection; nothing restarts. |
+| ...while connected, choosing "Stop server and close" | Nothing. The app runs Stop first, then closes. | **Not connected** (grey). |
 | ...during Start, before the server is launched | Nothing that costs money (at most the app's free firewall group). | **Not connected**. Press Start. |
 | ...during Start, after the server is launched | The server, which finishes setting itself up. The tunnel is not connected. | A warning that a server is already running and billing, with its uptime and cost. Press **Reconnect** to finish connecting to it (no second server is made), or **Stop**. |
 | ...during Stop | Possibly the server, if deletion hadn't been requested yet. The tunnel is already stopped. | Either **Not connected**, or the server still listed: press Stop again. |
@@ -331,7 +360,7 @@ While a server already exists, the button reads **Reconnect** and skips step 4. 
 |---|---|
 | You forget to press Stop, or your laptop dies | Every server deletes itself at the time you chose (1–24 h). This is scheduled first thing at boot, so it holds even if setup fails. |
 | Start fails halfway | The server it launched is deleted automatically. |
-| App crashed or was closed with the server left running | A warning pops up when the app opens. See [Closing and reopening](#closing-and-reopening-the-app). |
+| App crashed or was closed with the server left running | A warning appears at the top of the window when the app opens. See [Closing and reopening](#closing-and-reopening-the-app). |
 | You lose track of time | The detail line shows uptime, cost so far, the maximum cost, and time until auto-delete. |
 | The server auto-deleted while the app was closed | The leftover tunnel is stopped automatically when you open the app. |
 | Stop misses something | After Stop the app re-checks for anything it created, and warns if anything is left. |
@@ -343,9 +372,9 @@ While a server already exists, the button reads **Reconnect** and skips step 4. 
 
 ## Cost (approximate)
 
-While a server exists: about **USD 0.02 per hour** (`t3.micro` + public IPv4 address + 8 GB disk, Mumbai prices). This is covered by free-plan credits.
+While a server exists: **USD 0.0172 per hour** in Mumbai for the default size (`t3.micro` $0.0112 + public IPv4 address $0.0050 + 8 GB disk $0.0010; AWS list prices). Other regions and sizes are shown in the app. Free-plan credits cover it.
 
-**Data you download through the proxy** counts as AWS outbound data transfer: the first 100 GB per month are free, after that roughly USD 0.09–0.11 per GB depending on region.
+**Data you download through the proxy** counts as AWS outbound data transfer: the first 100 GB per month are free, after that USD 0.09–0.15 per GB depending on region (Mumbai: $0.1093).
 
 After Stop: nothing. The app's security group, IAM user and role are free.
 
@@ -368,8 +397,9 @@ After Stop: nothing. The app's security group, IAM user and role are free.
 | "Signed out" in the status line | The 1-hour sign-in ended. Press Refresh and enter a new code. |
 | "Traffic left via …" | Another VPN is active. Turn it off and press Start. |
 | Works on one network but not another | Some networks block this kind of traffic even on port 443. |
-| "Data this month: unknown" or "can't read this month's data usage" | Update your IAM policy (see [Updating your IAM policy](#updating-your-iam-policy-when-upgrading-from-100)). |
-| "free 100 GB of data is used up" | The limit for this month is reached. Wait for the 1st (UTC), or allow going over in Settings → Server & data. |
+| "Data this month: unknown" or "can't read this month's data usage" | Update your IAM policy (see [Updating your IAM policy](#updating-your-iam-policy)). |
+| "AWS bill: unknown" or the bill stays $0.00 | Do the one-time setup in [Seeing the real bill and your credits](#seeing-the-real-bill-and-your-credits). |
+| "This month's free 100 GB is used up" | The limit for this month is reached. Wait for the 1st (UTC), or allow going over in Settings → Data. |
 
 ## Files on your laptop
 
@@ -403,7 +433,7 @@ The folder is deliberately not under `AppData`. The Microsoft Store version of P
 ## Known limitations
 
 - **Windows only.** sing-box's network adapter, DPAPI encryption and the launcher are Windows-specific.
-- **The `.exe` isn't code-signed yet.** Windows shows a SmartScreen warning, and Smart App Control blocks it (see Step 3). Run from source on those machines.
+- **The `.exe` isn't code-signed yet.** Smart App Control blocks it and SmartScreen warns about it, so for now the app is only supported from source with Python 3.11 (see Step 3).
 - **Needs admin rights** (for the network adapter).
 - **Only one server at a time, in one region.** Changing region requires Stop first.
 - **Estimates are estimates.** Progress times come from typical runs, and cost figures use Mumbai prices, not your live bill. The budget alert (Step 2) is the source of truth.
@@ -428,7 +458,7 @@ The tests run offline and make no AWS calls. They cover:
 - the server startup script and config handling;
 - versioning.
 
-Set `SINGBOX_EXE` to a `sing-box.exe` to also validate the generated config. `--check` verifies a build (bundled libraries, Tk, DPAPI) without touching AWS.
+Set `SINGBOX_EXE` to a `sing-box.exe` to also validate the generated config. `--check` verifies an install or build (libraries, the window's files, prices, DPAPI) without touching AWS.
 
 **CI** runs on every push. It runs the tests, then builds `ProxyOnDemand.exe` and runs its `--check`.
 

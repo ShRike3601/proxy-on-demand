@@ -261,23 +261,32 @@ app.warp = lambda *a: ""  # WARP not installed
 assert app.warp_connected() is False
 app.warp = real_warp
 
-# uptime_text: cost and countdown
+# real prices: every offered region and size, from AWS's price list (prices.json)
 from datetime import datetime, timedelta, timezone
+import time
 now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-t = app.uptime_text(now - timedelta(hours=2, minutes=5), now=now)
-assert t.startswith("Running 2h05m") and "auto-deletes in 9h55m" in t and "at most ~$0.21" in t, t
-assert "in 0h00m" in app.uptime_text(now - timedelta(hours=30), now=now)
-t = app.uptime_text(now - timedelta(minutes=10), 3, now=now)
-assert "auto-deletes in 2h50m" in t and "at most ~$0.05" in t and "less than $0.01" in t, t
-t = app.uptime_text(now - timedelta(hours=1), 12, now=now, size="t3.medium")
-assert "cost so far ~$0.05" in t and "at most ~$0.61" in t, "a bigger server costs more"
-
-# cost_text and sizes: hourly rate and session maximum per size; policy allows exactly the offered sizes
-assert "t3.micro, about $0.017 per hour" in app.cost_text(12) and "at most about $0.21" in app.cost_text(12)
-assert "at most about $0.02" in app.cost_text(1)
-assert "t3.small, about $0.028 per hour" in app.cost_text(12, "t3.small")
+assert set(app.PRICES) == set(app.REGIONS) and all(set(p["server"]) == set(app.SERVER_SIZES) for p in app.PRICES.values())
+r = app.rates("ap-south-1", "t3.micro")
+assert r["server"] == 0.0112 and r["ip"] == 0.005 and abs(r["disk"] - 0.0912 * 8 / 730) < 1e-9
+assert abs(app.hourly_usd("t3.micro", "ap-south-1") - 0.0172) < 0.0001
+assert app.hourly_usd("t3.micro", "us-east-1") < app.hourly_usd("t3.micro", "sa-east-1"), "prices follow the region"
 assert app.hourly_usd("t3.medium") > app.hourly_usd("t3.small") > app.hourly_usd("t3.micro")
-assert app.hourly_usd("bogus") == app.hourly_usd("t3.micro")
+assert app.hourly_usd("bogus") == app.hourly_usd("t3.micro") and app.rates("xx-nowhere-1") == app.rates("ap-south-1")
+plan = app.plan_view("ap-south-1", "t3.micro", 12)
+assert [x[0] for x in plan["parts"]] == ["Server (t3.micro)", "Public IP address", "Disk (8 GB)"]
+assert abs(plan["session_max"] - 12 * plan["hourly"]) < 1e-9 and plan["region_name"] == "Mumbai"
+
+# month_cost: only this month's running time, capped by the auto-delete time, plus data beyond 100 GB
+m_now = datetime(2026, 11, 20, 12, tzinfo=timezone.utc)
+cost_ledger = {"instances": {
+    "i-stopped": {"region": "ap-south-1", "launched": "2026-11-05T10:00:00+00:00", "size": "t3.micro", "hours": 12,
+                  "ended": "2026-11-05T12:00:00+00:00"},  # 2 h, then Stop
+    "i-midnight": {"region": "ap-south-1", "launched": "2026-10-31T22:00:00+00:00", "size": "t3.micro", "hours": 12},
+    "i-october": {"region": "ap-south-1", "launched": "2026-10-01T10:00:00+00:00", "size": "t3.micro", "hours": 12}}}
+rate = app.hourly_usd("t3.micro", "ap-south-1")
+assert abs(app.month_cost(cost_ledger, m_now) - 12 * rate) < 1e-9, "2 h + the 10 h that fell in November"
+extra = app.month_cost(cost_ledger, m_now, data_used=app.FREE_DATA_BYTES + 2**30) - 12 * rate
+assert abs(extra - app.rates()["data_gb"]) < 1e-9, "one GB beyond the free 100 GB is billed"
 launch_rule = next(s for s in app.iam_policy("ap-south-1")["Statement"] if s["Sid"] == "LaunchOnlyTaggedSmallServers")
 assert launch_rule["Condition"]["StringEquals"]["ec2:InstanceType"] == list(app.SERVER_SIZES)
 assert all(not k.startswith(("t4g", "c7g", "m7g")) for k in app.SERVER_SIZES), "x86 only (x86 Shadowsocks build)"
@@ -288,9 +297,6 @@ sf = os.path.join(d, "settings.json")
 open(sf, "w").write(json.dumps({"size": "x9.huge", "theme": "neon"}))  # theme: no longer a setting
 assert app.load_settings(sf)["size"] == "t3.micro" and "theme" not in app.load_settings(sf)
 shutil.rmtree(d)
-assert app.resolve_theme("dark") == "dark" and app.resolve_theme("light") == "light"
-assert app.resolve_theme("system") in ("light", "dark")
-assert set(app.THEMES["light"]) == set(app.THEMES["dark"]), "both themes define every color"
 
 # auto-delete hours: clamped to 1..24, carried into the server script and read back from the tag
 assert [app.clamp_hours(x) for x in (0, 1, "5", 99, "junk", None)] == [1, 1, 5, 24, 12, 12]
@@ -337,6 +343,11 @@ class FakeAws:
     def instances(self): return [i for i in self.insts if i["InstanceId"] not in self.terminated]
     used = 0
     def month_usage(self, ledger): return self.used
+    budget_calls = 0
+    def app_budget(self):
+        self.budget_calls += 1
+        return {"actual": 0.41, "forecast": 0.9}
+    def credits_left(self): return {"amount": 87.5, "unit": "USD"}
     def launch(self, pw, sg, subnet, hours=12, cap_bytes=0, size="t3.micro"):
         self.launched.append("i-new")
         self.launch_hours, self.launch_cap, self.launch_size = hours, cap_bytes, size
@@ -360,10 +371,12 @@ def fake_app(aws):
     a.run = lambda job, steps, headline: job()  # synchronous, exceptions propagate
     app.load_settings = lambda path=None: {**DEFAULTS, "mfa": False, "region": "ap-south-1", "ssm_role": "", "max_hours": 5,
                                            "allow_over": False, "size": "t3.micro"}
-    mem = {"instances": {}, "warned": {}}
+    mem = {"instances": {}, "warned": {}, "aws": {}}
     app.load_ledger = lambda path=None: json.loads(json.dumps(mem))
     app.save_ledger = lambda ledger, path=None: mem.update(ledger)
-    app.record_instance = lambda iid, region, path=None, now=None: mem["instances"].update({iid: {"region": region}})
+    app.record_instance = lambda iid, region, path=None, now=None, **k: mem["instances"].update({iid: {"region": region}})
+    app.tcp_ms = lambda *a, **k: 30
+    a.steps = None
     a.ledger = mem
     app.save_settings = lambda changes, path=None: a.saved.update(changes)
     a.saved = {}
@@ -414,9 +427,10 @@ assert aws.terminated == ["i-stopped"] and aws.launched == ["i-new"]
 assert aws.launch_hours == 5, "the auto-delete hours chosen on the main window reach the server"
 assert a.connected_ip == "5.6.7.8"
 msgs = kinds(a)
-assert any(k == "popup" and "Successfully connected" in m and "Reconnect" in m for k, m in msgs)
+assert any(k == "popup" and m.startswith("Connected in") and "deletes itself" in m for k, m in msgs)
 assert ("start_label", "Reconnect") in msgs, "while a server runs, Start becomes Reconnect"
-assert any(k == "status" and m[1] == "ok" and "Connected via" in m[0] for k, m in msgs)
+assert any(k == "status" and m[1] == "ok" and m[0] == "Connected" for k, m in msgs)
+assert any(k == "tiles" and m["session"] and m["month"]["aws"] == 0.41 for k, m in msgs), "the numbers reach the page"
 reported = [m for k, m in msgs if k == "step"]
 assert reported == [s[0] for s in app.START_STEPS], reported
 
@@ -551,7 +565,13 @@ app.load_ledger, app.save_ledger = REAL["load_ledger"], REAL["save_ledger"]
 REAL["record_instance"]("i-new", "ap-south-1", lf, nov)
 saved = REAL["load_ledger"](lf)
 assert list(saved["instances"]) == ["i-new"] and saved["warned"] == {"2026-11": [0.8]}
-assert REAL["load_ledger"](os.path.join(d, "missing.json")) == {"instances": {}, "warned": {}}
+assert REAL["load_ledger"](os.path.join(d, "missing.json")) == {"instances": {}, "warned": {}, "aws": {}}
+REAL["record_instance"]("i-live", "ap-south-1", lf, nov, size="t3.small", hours=6)
+app.close_finished_servers("ap-south-1", {"i-live"}, lf, nov + timedelta(hours=2))
+got = REAL["load_ledger"](lf)["instances"]
+assert "ended" not in got["i-live"] and got["i-new"]["ended"] == (nov + timedelta(hours=2)).isoformat(), \
+    "a server that's gone gets an end time; a live one doesn't"
+assert got["i-live"]["size"] == "t3.small" and got["i-live"]["hours"] == 6
 shutil.rmtree(d)
 
 # thresholds and refresh rate
@@ -563,6 +583,63 @@ assert app.poll_seconds(10 * GB, False) == 900 and app.poll_seconds(92 * GB, Fal
 assert app.poll_seconds(92 * GB, True) == 900, "no need to hurry when there's no cap"
 assert "12.3 GB of the free 100 GB" in app.data_text(12.3 * GB, False) and "87.7 GB left" in app.data_text(12.3 * GB, False)
 assert "IAM policy" in app.data_text(None, False)
+utc = lambda s: datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+assert app.data_text(GB, False, utc("2026-11-22T10:00")).endswith("resets 1 Dec (in 8 days)")
+assert app.reset_text(utc("2026-12-31T23:00")) == "resets 1 Jan (in under a day)", "year rollover"
+assert app.reset_text(utc("2026-02-27T00:00")) == "resets 1 Mar (in 2 days)"
+
+# AWS's own figure: a free AWS Budgets budget on the app's tag, created on first use, read at most hourly
+class FakeBudgets:
+    class exceptions:
+        class NotFoundException(Exception):
+            pass
+    def __init__(self, exists): self.exists, self.created = exists, None
+    def describe_budget(self, AccountId, BudgetName):
+        assert AccountId == "123456789012" and BudgetName == app.BUDGET_NAME
+        if not self.exists:
+            raise self.exceptions.NotFoundException()
+        return {"Budget": {"CalculatedSpend": {"ActualSpend": {"Amount": "0.41", "Unit": "USD"},
+                                               "ForecastedSpend": {"Amount": "0.9", "Unit": "USD"}}}}
+    def create_budget(self, AccountId, Budget): self.created = Budget
+class FakeSts:
+    def get_caller_identity(self): return {"Account": "123456789012"}
+u = app.Aws.__new__(app.Aws)
+u.sts, u.log, u.budgets = FakeSts(), (lambda m: None), FakeBudgets(True)
+assert u.app_budget() == {"actual": 0.41, "forecast": 0.9}
+u.budgets = FakeBudgets(False)
+assert u.app_budget() == {"actual": 0.0, "forecast": None}
+assert u.budgets.created["CostFilters"] == {"TagKeyValue": [f"user:app${app.APP_TAG}"]}
+assert u.budgets.created["CostTypes"]["IncludeCredit"] is False, "the real cost, before credits"
+rules = {x["Sid"]: x for x in app.iam_policy("ap-south-1")["Statement"]}
+assert rules["ThisAppsBudget"]["Resource"] == f"arn:aws:budgets::*:budget/{app.BUDGET_NAME}", "only this one budget"
+assert "ce:" not in json.dumps(app.iam_policy("ap-south-1")), "no paid Cost Explorer calls"
+class FakeFreeTier:
+    def __init__(self, r): self.r = r
+    def get_account_plan_state(self): return self.r
+u.freetier = FakeFreeTier({"accountPlanRemainingCredits": {"amount": 87.5, "unit": "USD"}})
+assert u.credits_left() == {"amount": 87.5, "unit": "USD"}
+u.freetier = FakeFreeTier({"accountPlanType": "PAID"})
+assert u.credits_left() is None
+aws = FakeAws()
+b = fake_app(aws)
+f = b.aws_figures(aws)
+assert f["budget"]["actual"] == 0.41 and f["credits"]["amount"] == 87.5
+b.aws_figures(aws)
+assert aws.budget_calls == 1, "read at most once an hour"
+b.ledger["aws"]["at"] = "2000-01-01T00:00:00+00:00"
+b.aws_figures(aws)
+assert aws.budget_calls == 2, "an hour later it's read again"
+class Denied(Exception):
+    response = {"Error": {"Code": "AccessDeniedException"}}
+def deny(): raise Denied()
+aws.app_budget = deny
+b.ledger["aws"] = {}
+kinds(b)
+assert b.aws_figures(aws)["budget"] is None and b.ledger["aws"] == {}, "a failure isn't cached"
+assert ("policy", ["bill"]) in kinds(b), "a missing permission shows the IAM policy banner"
+aws.app_budget = lambda: {"actual": 1.0, "forecast": None}
+b.aws_figures(aws)
+assert ("policy", []) in kinds(b), "the banner goes once the policy works"
 
 # Start passes the remaining allowance to the new server; refuses when it can't measure or nothing is left
 aws = FakeAws()
@@ -602,7 +679,7 @@ aws.used = app.CAP_BYTES
 a.report(aws)
 msgs = kinds(a)
 assert any(k == "warn" and "stopped itself" in m for k, m in msgs)
-assert any(k == "status" and "free 100 GB of data is used up" in m[0] for k, m in msgs)
+assert any(k == "status" and "free 100 GB is used up" in m[0] for k, m in msgs)
 
 # copy guides: each points to a real README heading and uses the names the README tells people to type
 readme = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "README.md"), encoding="utf-8").read()
@@ -612,9 +689,18 @@ for key, (title, steps, anchor) in app.COPY_GUIDES.items():
     assert anchor in anchors, f"guide {key} links to #{anchor}, which isn't a README heading"
 for name in (app.POLICY_NAME, app.KEY_POLICY_NAME, app.USER_NAME, app.ROLE_NAME):
     assert f"`{name}`" in readme, f"{name} must match the README"
-src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_app.py"), encoding="utf-8").read()
-used = set(re.findall(r'copy\(json\.dumps\([^\n]*\), "(\w+)"\)', src))
-assert used == set(app.COPY_GUIDES), f"every Copy button needs a guide: {used} vs {set(app.COPY_GUIDES)}"
+copied = []
+real_clip, real_key = app.set_clipboard, app.load_key
+app.set_clipboard = copied.append
+app.load_key = lambda: {"user_arn": "arn:aws:iam::123456789012:user/proxy-on-demand", "key_id": "x", "secret": "y"}
+cp, seen = fake_app(FakeAws()), set()
+for kind, form in (("user", {"mfa": False}), ("user", {"mfa": True}), ("role_permissions", {}), ("trust", {}), ("auto", {})):
+    r = cp.copy_policy(kind, form)
+    assert r["steps"] and r["anchor"] in anchors, (kind, r)
+    seen.add(next(k for k, g in app.COPY_GUIDES.items() if g[0] == r["title"]))
+assert seen == set(app.COPY_GUIDES), "every Copy button has a guide"
+assert json.loads(copied[0])["Statement"] and "error" in cp.copy_policy("user", {"mfa": False, "region": "nowhere"})
+app.set_clipboard, app.load_key = real_clip, real_key
 
 # self-update: verified download, exe swap without duplicates, safe source install, git clones left alone
 import hashlib as _h, contextlib
@@ -672,7 +758,8 @@ stopped = []
 app.stop_singbox, app.singbox_running, app.egress_ip = (lambda: stopped.append(1)), (lambda: True), (lambda: "5.6.7.8")
 a.refresh()
 msgs = kinds(a)
-assert any(k == "status" and m[1] == "ok" and "friend" in m[0] for k, m in msgs) and ("sharing", {"state": "joined", "host": "5.6.7.8"}) in msgs
+assert any(k == "status" and m[1] == "ok" and "friend" in m[0] for k, m in msgs)
+assert any(k == "sharing" and m["state"] == "joined" and m["host"] == "5.6.7.8" for k, m in msgs)
 app.egress_ip = lambda: "9.9.9.9"  # the friend's server stopped: traffic no longer leaves through it
 a.refresh()
 assert a.joined is None and stopped and a.saved.get("joined") == "" and any(k == "status" and "Disconnected" in m[0] for k, m in kinds(a))
@@ -681,37 +768,14 @@ a.stop()
 assert a.joined is None and stopped and any(k == "status" and "Not connected" in m[0] for k, m in kinds(a))
 app.stop_singbox, app.singbox_running = (lambda: None), (lambda: False)
 
-# sharing panel text for every state (rendered with real Tk variables)
-import tkinter as tk
-root = tk.Tk()
-root.withdraw()
-p = app.App.__new__(app.App)
-p.root, p.px = root, (lambda n: n)
-p.share_head, p.share_text = tk.StringVar(master=root), tk.StringVar(master=root)
-p.copy_btn = type("B", (), {"pack": lambda *a, **k: None, "pack_forget": lambda *a, **k: None})()
-cases = {
-    "off": ({"state": "off"}, "Sharing is off"),
-    "on, no server": ({"state": "on", "server": False}, "Sharing is on"),
-    "on, 2 devices": ({"state": "on", "server": True, "peers": {"1.2.3.4": 2, "5.6.7.8": 1}, "mine": {"1.2.3.4"}},
-                      "Sharing is on · 2 of 5 devices connected"),
-    "on, nobody": ({"state": "on", "server": True, "peers": {}, "mine": set()}, "Sharing is on · 0 of 5 devices connected"),
-    "on, unknown": ({"state": "on", "server": True, "peers": None}, "Sharing is on"),
-    "joined": ({"state": "joined", "host": "5.6.7.8"}, "Using a friend's shared server"),
-}
-for name, (info, head) in cases.items():
-    p.show_sharing(info)
-    text = p.share_text.get()
-    assert p.share_head.get() == head, (name, p.share_head.get())
-    assert "{" not in text and "{" not in p.share_head.get(), (name, text)
-p.show_sharing(cases["on, 2 devices"][0])
-lines = p.share_text.get().splitlines()
-assert lines[0].startswith("•  1.2.3.4  (you)") and "2 connections" in lines[0] and "5.6.7.8" in lines[1], lines
+# sharing page data for every state; it reaches the page as JSON
+v = app.sharing_view({"state": "on", "server": True, "peers": {"5.6.7.8": 1, "1.2.3.4": 2}, "mine": {"1.2.3.4"}})
+assert v["peers"][0] == {"ip": "1.2.3.4", "connections": 2, "you": True} and v["peers"][1]["ip"] == "5.6.7.8"
+assert not v["over"] and json.loads(json.dumps(v)) == v
 over = {f"10.0.0.{i}": 1 for i in range(app.SHARE_LIMIT + 1)}
-p.show_sharing({"state": "on", "server": True, "peers": over, "mine": set()})
-assert "6 of 5" in p.share_head.get() and "Over the limit of 5" in p.share_text.get()
-p.show_sharing(cases["joined"][0])
-assert "5.6.7.8" in p.share_text.get()
-root.destroy()
+assert app.sharing_view({"state": "on", "server": True, "peers": over})["over"]
+assert app.sharing_view({"state": "on", "server": True, "peers": None})["peers"] is None
+assert app.sharing_view({"state": "joined", "host": "5.6.7.8"})["host"] == "5.6.7.8"
 
 # the friend's-server screen: Refresh and Disconnect never touch AWS, even when not connected
 a = fake_app(NoAws())
@@ -721,45 +785,44 @@ a.refresh()
 a.stop()
 assert all("Not connected" in m[0] for k, m in kinds(a) if k == "status")
 
-# the sharing switch: reverted if busy or the agreement is declined; with a server running it reconnects
-import tkinter as tk
-root = tk.Tk()
-root.withdraw()
+# the sharing switch: refused while busy, asks for the agreement once, with a server running it reconnects
 sw = fake_app(FakeAws())
-sw.root, sw.px, sw.share_var = root, (lambda n: n), tk.BooleanVar(master=root, value=True)
 started, shown = [], []
 sw.start, sw.show_sharing = (lambda: started.append(1)), (lambda info: shown.append(info))
 sw.busy = True
-sw.toggle_sharing()
-assert sw.share_var.get() is False and sw.saved == {}, "busy: nothing changes"
-sw.busy, real_agree = False, app.sharing_agreement
-app.sharing_agreement = lambda parent, px: False
-sw.share_var.set(True)
-sw.toggle_sharing()
-assert sw.share_var.get() is False and sw.saved == {}, "agreement declined: sharing stays off"
-app.sharing_agreement = lambda parent, px: True
-sw.share_var.set(True)
+assert "error" in sw.toggle_sharing(True) and sw.saved == {}, "busy: nothing changes"
+sw.busy = False
+assert sw.toggle_sharing(True)["agreement"] == list(app.AGREEMENT_POINTS) and sw.saved == {}, "first time: agree first"
 sw.server_up = False
-sw.toggle_sharing()
-assert sw.saved == {"sharing": True} and not started and shown[-1]["state"] == "on"
+assert sw.toggle_sharing(True, agreed=True) == {"ok": True}
+assert sw.saved == {"sharing": True, "sharing_agreed": True} and not started and shown[-1]["state"] == "on"
 sw.server_up = True
-sw.share_var.set(False)
-sw.toggle_sharing()
-assert sw.saved == {"sharing": False} and started == [1], "with a server running, Reconnect applies the firewall"
-app.sharing_agreement = real_agree
-v, calls = tk.BooleanVar(master=root, value=False), []
-s = app.switch(root, v, lambda: calls.append(v.get()), lambda n: n)
-s.flip()
-assert v.get() is True and calls == [True], "the slider flips the value, then calls the handler"
-v.set(False)
-assert s.find_all(), "redraws when the value changes from code"
-m = app.path_map(root, lambda n: n)
-m.place(width=600, height=64)
-root.update()
-for tone in app.COLORS:
-    m.show(tone, "Friend's server")
-assert len(m.find_all()) == 11, "two links, three chips with a dot and a label each"
-root.destroy()
+sw.toggle_sharing(False)
+assert sw.saved["sharing"] is False and started == [1], "with a server running, Reconnect applies the firewall"
+
+# the route: three hops with what is known about each; a failed check shows where it broke
+rt = fake_app(FakeAws())
+rt.server, rt.check = None, {}
+route = rt.route()
+assert [route[k]["state"] for k in ("device", "server", "internet")] == ["idle", "idle", "idle"]
+rt.server = {"ip": "5.6.7.8", "region": "ap-south-1", "size": "t3.micro", "hours": 12,
+             "launched": datetime.now(timezone.utc) - timedelta(hours=1)}
+rt.connected_ip, rt.check = "5.6.7.8", {"at": time.time(), "tunnel": True, "server_ms": 41, "exit_ok": True}
+route = rt.route()
+assert [route[k]["state"] for k in ("device", "server", "internet")] == ["ok", "ok", "ok"]
+assert route["server"]["lines"][0] == "Mumbai · t3.micro" and "41 ms" in route["server"]["lines"][1]
+rt.check = {"at": time.time(), "tunnel": True, "server_ms": None, "exit_ok": False}
+route = rt.route()
+assert route["server"]["state"] == "error" and route["internet"]["state"] == "error"
+assert json.loads(json.dumps(route)) == route and app.device_name() in ("This laptop", "This PC")
+
+# the page: every call it makes exists on the Bridge, and nothing of the App is reachable from it
+page_js = open(os.path.join(here, "ui", "app.js"), encoding="utf-8").read()
+page_calls = set(re.findall(r"api\(\)\.(\w+)\(", page_js)) | set(re.findall(r"\ba\.(\w+)\(", page_js))
+assert page_calls <= {n for n in dir(app.Bridge) if not n.startswith("_")}, page_calls
+assert "ui.receive" in app.ui_html() and "/*SCRIPT*/" not in app.ui_html() and "/*STYLE*/" not in app.ui_html()
+br = app.Bridge(fake_app(FakeAws()))
+assert br.choose("../../evil") == "choose" and br.estimate("ap-south-1", "t3.micro", 99)["hours"] == 24
 
 # launch: ask "own server or join" unless something is already running
 assert app.startup_mode(None, False) == "choose"

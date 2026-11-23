@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<title>Proxy on demand</title>
+<style>/*STYLE*/</style>
+</head>
+<body>
+<div class="app">
+  <nav class="rail" aria-label="Sections">
+    <div class="brand" aria-hidden="true" data-icon="shield"></div>
+    <button class="nav" data-go="home" aria-label="Home"><span data-icon="home"></span><span class="tip">Home</span></button>
+    <button class="nav" data-go="usage" data-own aria-label="Cost and data"><span data-icon="receipt"></span><span class="tip">Cost and data</span></button>
+    <button class="nav" data-go="sharing" data-own aria-label="Sharing"><span data-icon="users"></span><span class="tip">Sharing</span></button>
+    <button class="nav" data-go="activity" aria-label="Activity"><span data-icon="list"></span><span class="tip">Activity</span></button>
+    <div class="spacer"></div>
+    <button class="nav" id="theme" aria-label="Switch theme"><span data-icon="moon"></span><span class="tip">Switch theme</span></button>
+    <button class="nav" data-go="settings" aria-label="Settings"><span data-icon="settings"></span><span class="tip">Settings</span><i class="badge" id="settings-badge" hidden></i></button>
+  </nav>
+
+  <main id="main">
+    <div class="column">
+      <div class="stack" id="banners" aria-live="polite"></div>
+
+      <section data-page="choose" hidden>
+        <h1 class="page-title">How do you want to connect?</h1>
+        <div class="choose">
+          <button class="option" data-choose="own"><span data-icon="server" data-size="28"></span><strong>Run my own server</strong>
+            <span class="muted">On your own AWS account. You pay AWS directly, usually a few cents a session. The first time, you'll add your AWS access key.</span></button>
+          <button class="option" data-choose="join"><span data-icon="link" data-size="28"></span><strong>Join a friend's server</strong>
+            <span class="muted">Paste a link someone shared with you. No AWS account needed.</span></button>
+        </div>
+      </section>
+
+      <section data-page="home" hidden class="stack">
+        <div class="card hero">
+          <div class="hero-top">
+            <span class="dot" id="dot"></span>
+            <div class="grow">
+              <p class="headline" id="headline">Checking</p>
+              <p class="detail" id="detail"></p>
+            </div>
+            <div class="hero-actions" id="actions"></div>
+          </div>
+          <div class="progress" id="progress" hidden>
+            <div class="bar"><i id="bar"></i></div>
+            <span class="faint num" id="step"></span>
+          </div>
+          <div class="route" id="route"></div>
+          <div class="hero-foot">
+            <span class="faint" id="mode-note"></span>
+            <button class="btn link" id="switch-mode"></button>
+          </div>
+        </div>
+        <div class="card" id="join-card" hidden>
+          <h2>Connect to a friend's server</h2>
+          <p class="help" id="join-warning"></p>
+          <div class="row" style="margin-top:12px">
+            <input type="text" id="join-link" class="grow" placeholder="ss://..." spellcheck="false" autocomplete="off">
+            <button class="btn primary" id="join-go">Connect</button>
+          </div>
+          <p class="faint" id="join-error" role="alert" style="color:var(--error)"></p>
+        </div>
+        <div class="tiles" id="tiles" data-own></div>
+        <div class="card" id="plan" data-own></div>
+        <div class="card" id="join-info" hidden><h2>Using a friend's server</h2><p class="help" id="join-info-text"></p></div>
+      </section>
+
+      <section data-page="usage" hidden class="stack">
+        <h1 class="page-title">Cost and data</h1>
+        <p class="page-sub">Worked out on this PC from each server's running time and AWS's own prices, so checking costs nothing. AWS's own figure is shown next to it when it's set up.</p>
+        <div class="tiles" id="tiles-2"></div>
+        <div class="split">
+          <div class="card" id="month-card"></div>
+          <div class="card" id="plan-2"></div>
+        </div>
+        <div class="card" id="aws-setup"></div>
+      </section>
+
+      <section data-page="sharing" hidden class="stack">
+        <h1 class="page-title">Sharing</h1>
+        <p class="page-sub">Let up to 5 devices you trust use your server with one link. You pay for their usage and you're responsible for their traffic.</p>
+        <div class="card">
+          <div class="row">
+            <div class="grow"><h2 style="margin:0" id="share-head">Sharing is off</h2><p class="muted" id="share-sub" style="margin:4px 0 0"></p></div>
+            <button class="btn small" id="share-copy" hidden><span data-icon="copy" data-size="16"></span>Copy share link</button>
+            <label class="switch"><input type="checkbox" id="share-toggle" aria-label="Share my server"></label>
+          </div>
+          <div id="agreement" hidden></div>
+          <ul class="peers" id="peers"></ul>
+        </div>
+        <div class="card"><h2>How sharing works</h2><p class="help selectable" id="sharing-help"></p></div>
+      </section>
+
+      <section data-page="activity" hidden class="stack">
+        <div class="row"><h1 class="page-title grow">Activity</h1><button class="btn small" id="open-logs"><span data-icon="folder" data-size="16"></span>Open logs folder</button></div>
+        <div class="card"><pre class="log" id="log">Nothing yet.</pre></div>
+      </section>
+
+      <section data-page="settings" hidden class="stack">
+        <h1 class="page-title">Settings</h1>
+        <div class="card" id="settings-form"></div>
+      </section>
+    </div>
+  </main>
+</div>
+<script>/*SCRIPT*/</script>
+</body>
+</html>

@@ -88,6 +88,21 @@
       }
     },
     {
+      "Sid": "ThisAppsBudget",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ViewBudget",
+        "budgets:ModifyBudget"
+      ],
+      "Resource": "arn:aws:budgets::*:budget/proxy-on-demand"
+    },
+    {
+      "Sid": "CreditsLeft",
+      "Effect": "Allow",
+      "Action": "freetier:GetAccountPlanState",
+      "Resource": "*"
+    },
+    {
       "Sid": "LatestAmazonLinuxAmi",
       "Effect": "Allow",
       "Action": "ssm:GetParameter",

@@ -24,7 +24,7 @@ jobs:
           python-version: "3.13"
       - run: pip install -r requirements-build.txt
       - run: python scripts/make_version_file.py
-      - run: pyinstaller --noconfirm --clean --onefile --windowed --uac-admin --name ProxyOnDemand --version-file version_info.txt proxy_app.py
+      - run: pyinstaller --noconfirm --clean --onefile --windowed --uac-admin --name ProxyOnDemand --version-file version_info.txt --add-data "ui;ui" --add-data "prices.json;." --collect-all webview proxy_app.py
       - name: Self-check the built exe
         shell: pwsh
         run: |

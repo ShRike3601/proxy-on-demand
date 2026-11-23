@@ -2,6 +2,21 @@
 
 All notable changes to this project. Versions follow [Semantic Versioning](https://semver.org/). Each version's section here becomes its GitHub Release notes.
 
+## 2.0.0
+
+- **A new window.** Rebuilt as a modern page shown by Windows' own Edge engine (WebView2), still started with `Start Proxy App.bat` and Python, so it works with Smart App Control on.
+  - A slim sidebar: Home, Cost and data, Sharing, Activity; the theme switch and Settings sit at the bottom.
+  - **No pop-up windows.** Everything the app has to say appears inside the window: notices, warnings, the MFA code, the sharing agreement, and "Stop the server before closing?".
+  - **A live route:** This laptop (or This PC) → your server → Internet. Each step shows what the app last checked (tunnel, server region, size, IP, response time, whether traffic really leaves through the server) and turns red with the reason when it fails.
+  - **Cost and data as headline numbers:** this session, this month, data used out of the free 100 GB with its reset date, and AWS credits left.
+  - **A bold "Update your IAM policy" banner** when the app finds a permission missing, with a Copy button and the steps.
+- **Real prices.** Costs use AWS's own list prices for your region and size, shipped with the app (`prices.json`), with the server, its public IP address and its disk shown separately. Example: in Mumbai a t3.micro server is $0.0112 an hour, its public IP $0.0050 and its disk $0.0010, so $0.0172 an hour in total.
+- **This month's cost without paying to check it.** The app works out the month's cost on your PC from each server's running time, so checking is free. Next to it, it shows AWS's own figure from a free AWS Budgets budget limited to the app's servers. Cost Explorer, which charges $0.01 a check, is no longer used.
+- **Credits left** on your AWS account (AWS free plan accounts).
+- **When the free 100 GB resets**, for example "Resets 1 Dec (in 8 days)".
+- **The supported way to run the app is from source with Python 3.11:** run `Start Proxy App.bat` as administrator. The unsigned `.exe` is blocked by Smart App Control, so it isn't recommended until it's code-signed.
+- **Action needed:** copy the IAM policy again when the app asks. It adds read-only access to one AWS Budgets budget (`proxy-on-demand`) and to your credit balance. For AWS's own figure, also activate the `app` cost allocation tag once (see "Seeing the real bill and your credits" in the README). Without these steps everything else works.
+
 ## 1.4.0
 
 - **New look.** A graphite-and-green theme in dark and light. Each screen's main button (Start, Connect with a link) stands out in solid white (dark) or black (light).
